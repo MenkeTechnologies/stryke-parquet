@@ -1,0 +1,114 @@
+# t/test_parquet.stk — self-contained round-trip tests.
+#
+# Uses the helper's `mkdemo` subcommand to generate a known-shape parquet
+# in /tmp, then exercises every diagnostic command against it.
+
+require "./lib/Parquet.stk"
+
+my $have_helper = eval { Parquet::helper_path(); 1 }
+unless ($have_helper) {
+    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+    exit 0
+}
+
+my $tmp = "/tmp/stryke-parquet-test-$$"
+mkdir $tmp unless -d $tmp
+my $path = "$tmp/demo.parquet"
+my $path2 = "$tmp/demo-snap.parquet"
+
+my $bin = Parquet::helper_path()
+my $rc = system "$bin mkdemo " . Parquet::_shq($path) . " > /dev/null"
+die "mkdemo failed: $rc" if $rc != 0
+
+p "1..10"
+my $i = 0
+
+# 1. count
+my $n
+eval { $n = Parquet::count($path) }
+$i++
+p $@ ? "not ok $i - count: $@" : ($n == 5 ? "ok $i - count" : "not ok $i - count=$n")
+
+# 2. inspect
+my $info
+eval { $info = Parquet::inspect($path) }
+$i++
+p $@ ? "not ok $i - inspect: $@" :
+       ($info->{num_rows} == 5 && $info->{num_columns} == 3
+            ? "ok $i - inspect"
+            : "not ok $i - inspect bad shape")
+
+# 3. schema
+my $sch
+eval { $sch = Parquet::schema($path) }
+$i++
+p $@ ? "not ok $i - schema: $@" :
+       ($sch->{num_fields} == 3 ? "ok $i - schema (3 fields)" :
+        "not ok $i - schema fields=$sch->{num_fields}")
+
+# 4. head 2
+my @first
+eval { @first = Parquet::head($path, n => 2) }
+$i++
+p $@ ? "not ok $i - head: $@" :
+       (len(@first) == 2 && $first[0]->{name} eq "alice"
+            ? "ok $i - head"
+            : "not ok $i - head wrong")
+
+# 5. tail 2
+my @last
+eval { @last = Parquet::tail($path, n => 2) }
+$i++
+p $@ ? "not ok $i - tail: $@" :
+       (len(@last) == 2 && $last[-1]->{name} eq "eve"
+            ? "ok $i - tail"
+            : "not ok $i - tail wrong: " . to_json(\@last))
+
+# 6. rowgroups
+my @rgs
+eval { @rgs = Parquet::rowgroups($path) }
+$i++
+p $@ ? "not ok $i - rowgroups: $@" :
+       (len(@rgs) >= 1 && $rgs[0]->{num_rows} == 5
+            ? "ok $i - rowgroups"
+            : "not ok $i - rowgroups bad shape")
+
+# 7. stats all columns (3 lines)
+my @stats
+eval { @stats = Parquet::stats($path) }
+$i++
+p $@ ? "not ok $i - stats: $@" :
+       (len(@stats) == 3 ? "ok $i - stats" :
+        "not ok $i - stats got " . len(@stats))
+
+# 8. stats single column with null count
+my @scol
+eval { @scol = Parquet::stats($path, column => "score") }
+$i++
+p $@ ? "not ok $i - stats(score): $@" :
+       (len(@scol) == 1 && $scol[0]->{null_count} == 1
+            ? "ok $i - stats(score) null_count=1"
+            : "not ok $i - stats(score) wrong: " . to_json(\@scol))
+
+# 9. column projection in head
+my @proj
+eval { @proj = Parquet::head($path, n => 1, columns => ["id", "name"]) }
+$i++
+p $@ ? "not ok $i - head projection: $@" :
+       (defined $proj[0]->{id} && defined $proj[0]->{name} && !exists $proj[0]->{score}
+            ? "ok $i - head projection"
+            : "not ok $i - head projection got: " . to_json($proj[0]))
+
+# 10. compress to snappy
+my $cr
+eval { $cr = Parquet::compress($path, $path2, codec => "snappy") }
+$i++
+p $@ ? "not ok $i - compress: $@" :
+       ($cr->{num_rows} == 5 && -e $path2
+            ? "ok $i - compress (#{$cr->{dst_size}} bytes)"
+            : "not ok $i - compress wrong")
+
+# cleanup
+unlink $path  if -e $path
+unlink $path2 if -e $path2
+rmdir $tmp   if -d $tmp

@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --locked
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --no-fail-fast
+
+  helper-round-trip:
+    name: Helper round-trip (mkdemo + diagnostics)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: 10-op round-trip
+        run: |
+          set -euo pipefail
+          H=./target/release/stryke-parquet-helper
+          $H mkdemo /tmp/sp.parquet | jq -e '.num_rows == 5'
+          $H count    /tmp/sp.parquet | jq -e '.num_rows == 5'
+          $H inspect  /tmp/sp.parquet | jq -e '.num_columns == 3 and .num_row_groups == 1'
+          $H schema   /tmp/sp.parquet | jq -e '.num_fields == 3'
+          $H head     /tmp/sp.parquet --n=2 | wc -l | tr -d ' ' | grep -x 2
+          $H tail     /tmp/sp.parquet --n=1 | jq -e '.name == "eve"'
+          $H rowgroups /tmp/sp.parquet | jq -e '.num_rows == 5'
+          $H stats    /tmp/sp.parquet --column=score | jq -e '.null_count == 1'
+          $H to-csv   /tmp/sp.parquet | head -1 | grep -x 'id,name,score'
+          $H compress /tmp/sp.parquet /tmp/sp-snap.parquet --codec=snappy \
+              | jq -e '.num_rows == 5 and .dst_size > 0'
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+  release-build:
+    name: Release Build (${{ matrix.target }})
+    needs: [check, test, helper-round-trip]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stryke-parquet-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/stryke-parquet-helper

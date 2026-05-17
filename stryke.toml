@@ -1,0 +1,19 @@
+[package]
+name = "parquet"
+version = "0.1.0"
+description = "Parquet file inspector for stryke — schema, footer stats, row-group breakdown, head/tail, format conversion. Diagnostic counterpart to stryke-arrow."
+authors = ["MenkeTechnologies"]
+license = "MIT"
+repository = "https://github.com/MenkeTechnologies/stryke-parquet"
+edition = "2026"
+
+[bin]
+parquet = "bin/parquet.stk"
+parquet-build = "bin/parquet-build.stk"
+
+[scripts]
+build = "cargo build --release"
+build-debug = "cargo build"
+clean = "cargo clean"
+test = "s test t/"
+install = "s pkg install -g ."

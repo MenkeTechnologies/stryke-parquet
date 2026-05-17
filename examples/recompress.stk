@@ -1,0 +1,15 @@
+#!/usr/bin/env stryke
+# examples/recompress.stk — switch a parquet's codec, report size delta.
+# Run:   s examples/recompress.stk in.parquet out.parquet [zstd|snappy|gzip|lz4|brotli|uncompressed]
+
+use Parquet
+
+my ($src, $dst, $codec) = @ARGV
+die "usage: recompress.stk SRC DST [codec]\n" unless defined $dst
+$codec //= "zstd"
+
+my $r = Parquet::compress $src, $dst, codec => $codec
+my $saved = $r->{src_size} - $r->{dst_size}
+my $pct = $r->{src_size} > 0 ? (100.0 * $saved / $r->{src_size}) : 0
+p sprintf("%s: %d → %d bytes (%+.1f%% with %s)",
+          $dst, $r->{src_size}, $r->{dst_size}, -$pct, $codec)
