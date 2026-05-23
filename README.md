@@ -1,12 +1,46 @@
-# stryke-parquet
+```
+ ███████╗████████╗██████╗ ██╗   ██╗██╗  ██╗███████╗
+ ██╔════╝╚══██╔══╝██╔══██╗╚██╗ ██╔╝██║ ██╔╝██╔════╝
+ ███████╗   ██║   ██████╔╝ ╚████╔╝ █████╔╝ █████╗
+ ╚════██║   ██║   ██╔══██╗  ╚██╔╝  ██╔═██╗ ██╔══╝
+ ███████║   ██║   ██║  ██║   ██║   ██║  ██╗███████╗
+ ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝
+                   [ p a r q u e t ]
+```
+
+[![CI](https://github.com/MenkeTechnologies/stryke-parquet/actions/workflows/ci.yml/badge.svg)](https://github.com/MenkeTechnologies/stryke-parquet/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
+
+### `[PARQUET FILE INSPECTOR FOR STRYKE // SCHEMA + STATS + ROW-GROUPS + HEAD/TAIL + RECOMPRESS]`
+
+> *"See into parquet without loading it."*
 
 Parquet file inspector for stryke — schema, footer stats, row-group
 breakdown, head/tail, recompression. Diagnostic counterpart to
 [stryke-arrow](../stryke-arrow). Opt-in package tier.
 
-Created by MenkeTechnologies.
+### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-arrow`](https://github.com/MenkeTechnologies/stryke-arrow) · [`stryke-duckdb`](https://github.com/MenkeTechnologies/stryke-duckdb) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
-## What this is (and what it isn't)
+---
+
+## Table of Contents
+
+- [\[0x00\] What this is (and what it isn't)](#0x00-what-this-is-and-what-it-isnt)
+- [\[0x01\] Install](#0x01-install)
+- [\[0x02\] Quick start](#0x02-quick-start)
+- [\[0x03\] CLI: `parquet`](#0x03-cli-parquet)
+- [\[0x04\] API reference](#0x04-api-reference)
+- [\[0x05\] Helper protocol](#0x05-helper-protocol)
+- [\[0x06\] Supported compression codecs](#0x06-supported-compression-codecs)
+- [\[0x07\] Tests](#0x07-tests)
+- [\[0x08\] Dev workflow](#0x08-dev-workflow)
+- [\[0x09\] Layout](#0x09-layout)
+- [\[0xFF\] License](#0xff-license)
+
+---
+
+## [0x00] What this is (and what it isn't)
 
 | | stryke-arrow | **stryke-parquet** |
 |---|---|---|
@@ -21,7 +55,7 @@ serve different user intents. Use stryke-arrow when parquet is one stop
 in a data pipeline; use stryke-parquet when parquet itself is the
 artifact you're investigating.
 
-## Install
+## [0x01] Install
 
 ```sh
 cd ~/projects/stryke-parquet
@@ -35,7 +69,7 @@ Or:
 make install
 ```
 
-## Quick start
+## [0x02] Quick start
 
 ```stryke
 use Parquet
@@ -71,7 +105,7 @@ Parquet::compress "events.parquet", "events.zst.parquet",
                   codec => "zstd"                                  # recompress
 ```
 
-## CLI: `parquet`
+## [0x03] CLI: `parquet`
 
 ```sh
 parquet inspect    events.parquet
@@ -92,7 +126,7 @@ parquet build                               # cargo build --release
 parquet version
 ```
 
-## API reference
+## [0x04] API reference
 
 ```stryke
 Parquet::inspect    $path → \%info
@@ -170,7 +204,7 @@ writer wrote it (most parquet writers don't).
 }
 ```
 
-## Helper protocol
+## [0x05] Helper protocol
 
 ```sh
 stryke-parquet-helper inspect events.parquet
@@ -187,7 +221,7 @@ Output:
 * `head`, `tail`, `to-json` → NDJSON rows
 * `to-csv` → CSV on stdout (or to `--output=PATH`)
 
-## Supported compression codecs
+## [0x06] Supported compression codecs
 
 | Codec | Library | Notes |
 |---|---|---|
@@ -198,7 +232,7 @@ Output:
 | `brotli` | `brotli` | high ratio, slow |
 | `uncompressed` | — | fastest write, biggest file |
 
-## Tests
+## [0x07] Tests
 
 ```sh
 cargo test                                # compiles, no live calls
@@ -209,7 +243,7 @@ The suite uses `parquet mkdemo` to generate a fixture parquet in `/tmp/`
 then exercises every diagnostic command against it. No external services
 required.
 
-## Dev workflow
+## [0x08] Dev workflow
 
 ```sh
 make             # release build
@@ -219,7 +253,7 @@ make install
 make clean
 ```
 
-## Layout
+## [0x09] Layout
 
 ```
 stryke-parquet/
@@ -243,6 +277,6 @@ stryke-parquet/
     release.yml                    # cross-compile + GH release on tag push
 ```
 
-## License
+## [0xFF] License
 
 MIT.
