@@ -854,4 +854,237 @@ mod tests {
         assert_eq!(j["fields"][0]["nullable"], json!(false));
         assert_eq!(j["fields"][1]["nullable"], json!(true));
     }
+
+    #[test]
+    fn compare_values_string_lex_order() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!("a"), &json!("b")), Less);
+        assert_eq!(compare_values(&json!("z"), &json!("a")), Greater);
+    }
+
+    #[test]
+    fn compare_values_bool_ordering() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(false), &json!(true)), Less);
+    }
+
+    #[test]
+    fn parse_compression_bzip2_unsupported() {
+        let err = parse_compression("bzip2").unwrap_err();
+        assert!(format!("{err}").contains("unknown codec"));
+    }
+
+    #[test]
+    fn data_type_label_fixed_size_list_falls_back_to_debug() {
+        let inner = Field::new("item", DataType::Int32, true);
+        let dt = DataType::FixedSizeList(Arc::new(inner), 4);
+        let label = data_type_label(&dt);
+        assert!(label.contains("fixedsizelist"), "label = {label}");
+        assert!(label.contains("4"));
+    }
+
+    #[test]
+    fn parse_columns_single_column_no_commas() {
+        assert_eq!(parse_columns(Some("only")).unwrap(), vec!["only"]);
+    }
+
+    #[test]
+    fn merge_min_max_equal_candidates_keep_first() {
+        assert_eq!(merge_min(Some(json!(5)), json!(5)), json!(5));
+        assert_eq!(merge_max(Some(json!(5)), json!(5)), json!(5));
+    }
+
+    #[test]
+    fn emit_ndjson_empty_object() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!({})).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "{}\n");
+    }
+
+    #[test]
+    fn data_type_label_timestamp_with_tz() {
+        use arrow::datatypes::TimeUnit;
+        let dt = DataType::Timestamp(TimeUnit::Second, Some("UTC".into()));
+        let label = data_type_label(&dt);
+        assert!(label.contains("timestamp"));
+        assert!(label.contains("utc"));
+    }
+
+    #[test]
+    fn parse_compression_gzip_alias() {
+        assert!(matches!(parse_compression("gzip").unwrap(), Compression::GZIP(_)));
+        assert!(matches!(parse_compression("gz").unwrap(), Compression::GZIP(_)));
+    }
+
+    #[test]
+    fn compare_values_null_equal() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&Value::Null, &Value::Null), Equal);
+    }
+
+    #[test]
+    fn schema_to_json_single_field() {
+        let s = Schema::new(vec![Field::new("only", DataType::Int32, true)]);
+        let j = schema_to_json(&s);
+        assert_eq!(j["num_fields"], 1);
+        assert_eq!(j["fields"][0]["name"], json!("only"));
+    }
+
+    #[test]
+    fn parse_columns_only_commas_returns_empty() {
+        assert_eq!(parse_columns(Some(",,,")).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn merge_min_none_takes_candidate() {
+        assert_eq!(merge_min(None, json!("z")), json!("z"));
+    }
+
+    #[test]
+    fn emit_ndjson_array_top_level() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!([1, 2])).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "[1,2]\n");
+    }
+
+    #[test]
+    fn data_type_label_uint32() {
+        assert_eq!(data_type_label(&DataType::UInt32), "uint32");
+    }
+
+    #[test]
+    fn parse_compression_snappy_case_insensitive() {
+        assert_eq!(parse_compression("Snappy").unwrap(), Compression::SNAPPY);
+    }
+
+    #[test]
+    fn merge_min_string_when_prev_none() {
+        assert_eq!(merge_min(None, json!("first")), json!("first"));
+    }
+
+    #[test]
+    fn compare_values_number_u64_in_json() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(100u64), &json!(200u64)), Less);
+    }
+
+    #[test]
+    fn schema_to_json_empty_schema() {
+        let s = Schema::empty();
+        let j = schema_to_json(&s);
+        assert_eq!(j["num_fields"], 0);
+        assert!(j["fields"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_columns_leading_trailing_commas() {
+        assert_eq!(parse_columns(Some(",a,b,")).unwrap(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn emit_ndjson_number() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!(99)).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "99\n");
+    }
+
+    #[test]
+    fn data_type_label_int8() {
+        assert_eq!(data_type_label(&DataType::Int8), "int8");
+    }
+
+    #[test]
+    fn file_size_zero_for_empty_file() {
+        let tmp = std::env::temp_dir().join(format!("stryke-parquet-empty-{}", std::process::id()));
+        std::fs::write(&tmp, b"").unwrap();
+        assert_eq!(file_size(&tmp), 0);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn data_type_label_float32() {
+        assert_eq!(data_type_label(&DataType::Float32), "float32");
+    }
+
+    #[test]
+    fn parse_compression_lz4_alias() {
+        assert_eq!(parse_compression("lz4").unwrap(), Compression::LZ4_RAW);
+    }
+
+    #[test]
+    fn merge_max_string_when_prev_none() {
+        assert_eq!(merge_max(None, json!("z")), json!("z"));
+    }
+
+    #[test]
+    fn merge_max_equal_candidates_keeps_prev() {
+        assert_eq!(merge_max(Some(json!(5)), json!(5)), json!(5));
+    }
+
+    #[test]
+    fn parse_columns_single_name() {
+        assert_eq!(parse_columns(Some("only")).unwrap(), vec!["only"]);
+    }
+
+    #[test]
+    fn emit_ndjson_bool_false() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!(false)).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "false\n");
+    }
+
+    #[test]
+    fn data_type_label_large_binary() {
+        assert_eq!(data_type_label(&DataType::LargeBinary), "large_binary");
+    }
+
+    #[test]
+    fn compare_values_equal_strings() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!("x"), &json!("x")), Equal);
+    }
+
+    #[test]
+    fn data_type_label_uint64() {
+        assert_eq!(data_type_label(&DataType::UInt64), "uint64");
+    }
+
+    #[test]
+    fn parse_compression_uncompressed_aliases() {
+        assert_eq!(parse_compression("none").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(parse_compression("uncompressed").unwrap(), Compression::UNCOMPRESSED);
+    }
+
+    #[test]
+    fn merge_min_string_lex() {
+        assert_eq!(merge_min(Some(json!("z")), json!("a")), json!("a"));
+    }
+
+    #[test]
+    fn parse_columns_none_returns_none() {
+        assert!(parse_columns(None).is_none());
+    }
+
+    #[test]
+    fn emit_ndjson_string() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!("x")).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "\"x\"\n");
+    }
+
+    #[test]
+    fn data_type_label_date32() {
+        assert_eq!(data_type_label(&DataType::Date32), "date32");
+    }
+
+    #[test]
+    fn compare_values_object_vs_object_equal() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!({"a": 1}), &json!({"a": 1})), Equal);
+    }
+
+    #[test]
+    fn merge_max_number_candidates() {
+        assert_eq!(merge_max(Some(json!(1)), json!(9)), json!(9));
+    }
 }
