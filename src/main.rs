@@ -1130,4 +1130,51 @@ mod tests {
     fn merge_max_none_takes_first() {
         assert_eq!(merge_max(None, json!(1)), json!(1));
     }
+
+    #[test]
+    fn data_type_label_int32_type() {
+        assert_eq!(data_type_label(&DataType::Int32), "int32");
+    }
+
+    #[test]
+    fn parse_compression_uncompressed() {
+        assert!(matches!(
+            parse_compression("uncompressed").unwrap(),
+            Compression::UNCOMPRESSED,
+        ));
+    }
+
+    #[test]
+    fn merge_min_equal_keeps_first() {
+        assert_eq!(merge_min(Some(json!(3)), json!(3)), json!(3));
+    }
+
+    #[test]
+    fn parse_columns_trailing_comma_ignored() {
+        let cols = parse_columns(Some("a,b,")).unwrap();
+        assert_eq!(cols, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn emit_ndjson_bool_true() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!(true)).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "true\n");
+    }
+
+    #[test]
+    fn data_type_label_utf8() {
+        assert_eq!(data_type_label(&DataType::Utf8), "string");
+    }
+
+    #[test]
+    fn compare_values_bool_false_less_than_true() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(false), &json!(true)), Less);
+    }
+
+    #[test]
+    fn merge_max_string_lex() {
+        assert_eq!(merge_max(Some(json!("a")), json!("z")), json!("z"));
+    }
 }
