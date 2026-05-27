@@ -659,3 +659,199 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
 fn _force_anyhow_link() -> anyhow::Error {
     anyhow!("unused")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // ─── parse_columns ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_columns_none_passthrough() {
+        assert_eq!(parse_columns(None), None);
+    }
+
+    #[test]
+    fn parse_columns_splits_and_trims() {
+        assert_eq!(
+            parse_columns(Some(" a , b , c ")).unwrap(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn parse_columns_filters_empty_segments() {
+        assert_eq!(
+            parse_columns(Some("a,,b,")).unwrap(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn parse_columns_empty_string_returns_empty_vec() {
+        assert_eq!(parse_columns(Some("")), Some(Vec::<String>::new()));
+    }
+
+    // ─── parse_compression ───────────────────────────────────────────
+
+    #[test]
+    fn parse_compression_known_codecs() {
+        assert_eq!(parse_compression("snappy").unwrap(), Compression::SNAPPY);
+        assert_eq!(parse_compression("none").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(parse_compression("uncompressed").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(parse_compression("lz4").unwrap(), Compression::LZ4_RAW);
+        assert_eq!(parse_compression("lz4_raw").unwrap(), Compression::LZ4_RAW);
+        // gz alias for gzip.
+        assert!(matches!(parse_compression("gz").unwrap(), Compression::GZIP(_)));
+        assert!(matches!(parse_compression("zstd").unwrap(), Compression::ZSTD(_)));
+        assert!(matches!(parse_compression("brotli").unwrap(), Compression::BROTLI(_)));
+    }
+
+    #[test]
+    fn parse_compression_case_insensitive() {
+        assert_eq!(parse_compression("SNAPPY").unwrap(), Compression::SNAPPY);
+        assert_eq!(parse_compression("Zstd").unwrap_or(Compression::SNAPPY), parse_compression("zstd").unwrap_or(Compression::SNAPPY));
+    }
+
+    #[test]
+    fn parse_compression_unknown_errors() {
+        let err = parse_compression("avro").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("unknown codec"));
+        assert!(msg.contains("avro"));
+    }
+
+    // ─── data_type_label ─────────────────────────────────────────────
+
+    #[test]
+    fn data_type_label_scalars() {
+        assert_eq!(data_type_label(&DataType::Boolean), "bool");
+        assert_eq!(data_type_label(&DataType::Int32), "int32");
+        assert_eq!(data_type_label(&DataType::Int64), "int64");
+        assert_eq!(data_type_label(&DataType::UInt8), "uint8");
+        assert_eq!(data_type_label(&DataType::Float64), "float64");
+        assert_eq!(data_type_label(&DataType::Utf8), "string");
+        assert_eq!(data_type_label(&DataType::LargeUtf8), "large_string");
+        assert_eq!(data_type_label(&DataType::Null), "null");
+        assert_eq!(data_type_label(&DataType::Date32), "date32");
+        assert_eq!(data_type_label(&DataType::Binary), "binary");
+        assert_eq!(data_type_label(&DataType::LargeBinary), "large_binary");
+    }
+
+    #[test]
+    fn data_type_label_decimals() {
+        assert_eq!(data_type_label(&DataType::Decimal128(18, 6)), "decimal128(18,6)");
+        assert_eq!(data_type_label(&DataType::Decimal256(38, 10)), "decimal256(38,10)");
+    }
+
+    #[test]
+    fn data_type_label_list_nests() {
+        let inner = Field::new("item", DataType::Int32, true);
+        assert_eq!(data_type_label(&DataType::List(Arc::new(inner))), "list<int32>");
+    }
+
+    #[test]
+    fn data_type_label_struct_concatenates() {
+        let dt = DataType::Struct(
+            vec![
+                Field::new("x", DataType::Int32, false),
+                Field::new("y", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        assert_eq!(data_type_label(&dt), "struct<x:int32,y:string>");
+    }
+
+    // ─── compare_values / merge_min / merge_max ──────────────────────
+
+    #[test]
+    fn compare_values_numbers_via_f64() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(1), &json!(2)), Less);
+        assert_eq!(compare_values(&json!(2.5), &json!(2.5)), Equal);
+        assert_eq!(compare_values(&json!(10), &json!(2)), Greater);
+    }
+
+    #[test]
+    fn compare_values_mixed_types_return_equal() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!(1), &json!("a")), Equal);
+        assert_eq!(compare_values(&Value::Null, &json!(1)), Equal);
+    }
+
+    #[test]
+    fn merge_min_picks_smaller_or_base_when_none() {
+        assert_eq!(merge_min(None, json!(5)), json!(5));
+        assert_eq!(merge_min(Some(json!(10)), json!(5)), json!(5));
+        assert_eq!(merge_min(Some(json!(2)), json!(7)), json!(2));
+    }
+
+    #[test]
+    fn merge_max_picks_larger_or_base_when_none() {
+        assert_eq!(merge_max(None, json!(5)), json!(5));
+        assert_eq!(merge_max(Some(json!(10)), json!(5)), json!(10));
+        assert_eq!(merge_max(Some(json!(2)), json!(7)), json!(7));
+    }
+
+    #[test]
+    fn merge_min_max_strings_lex_order() {
+        assert_eq!(merge_min(Some(json!("zebra")), json!("apple")), json!("apple"));
+        assert_eq!(merge_max(Some(json!("apple")), json!("zebra")), json!("zebra"));
+    }
+
+    // ─── emit_ndjson ─────────────────────────────────────────────────
+
+    #[test]
+    fn emit_ndjson_appends_newline() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &json!({"k": 1})).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "{\"k\":1}\n");
+    }
+
+    #[test]
+    fn emit_ndjson_multi_call_line_count() {
+        let mut buf = Vec::new();
+        for i in 0..4 {
+            emit_ndjson(&mut buf, &json!({"i": i})).unwrap();
+        }
+        assert_eq!(String::from_utf8(buf).unwrap().lines().count(), 4);
+    }
+
+    // ─── file_size ───────────────────────────────────────────────────
+
+    #[test]
+    fn file_size_returns_metadata_len() {
+        let tmp = std::env::temp_dir()
+            .join(format!("stryke-parquet-test-{}.bin", std::process::id()));
+        std::fs::write(&tmp, b"abcdefghij").unwrap();
+        let got = file_size(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(got, 10);
+    }
+
+    #[test]
+    fn file_size_missing_path_returns_zero() {
+        // Defensive: missing file → 0 (not a panic, not an error).
+        let nope = Path::new("/definitely/not/a/real/path/abc.parquet");
+        assert_eq!(file_size(nope), 0);
+    }
+
+    // ─── schema_to_json (smoke) ──────────────────────────────────────
+
+    #[test]
+    fn schema_to_json_emits_fields_with_num_fields() {
+        let s = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        let j = schema_to_json(&s);
+        assert!(j["fields"].is_array());
+        assert_eq!(j["fields"].as_array().unwrap().len(), 2);
+        assert_eq!(j["num_fields"], json!(2));
+        assert_eq!(j["fields"][0]["name"], json!("a"));
+        assert_eq!(j["fields"][0]["type"], json!("int32"));
+        assert_eq!(j["fields"][0]["nullable"], json!(false));
+        assert_eq!(j["fields"][1]["nullable"], json!(true));
+    }
+}
