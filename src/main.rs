@@ -1087,4 +1087,47 @@ mod tests {
     fn merge_max_number_candidates() {
         assert_eq!(merge_max(Some(json!(1)), json!(9)), json!(9));
     }
+
+    #[test]
+    fn data_type_label_int64() {
+        assert_eq!(data_type_label(&DataType::Int64), "int64");
+    }
+
+    #[test]
+    fn parse_compression_zstd_alias() {
+        assert!(matches!(parse_compression("zstd").unwrap(), Compression::ZSTD(_)));
+    }
+
+    #[test]
+    fn merge_min_number_candidates() {
+        assert_eq!(merge_min(Some(json!(10)), json!(3)), json!(3));
+    }
+
+    #[test]
+    fn parse_columns_two_names() {
+        assert_eq!(parse_columns(Some("a,b")).unwrap(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn emit_ndjson_null() {
+        let mut buf = Vec::new();
+        emit_ndjson(&mut buf, &Value::Null).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "null\n");
+    }
+
+    #[test]
+    fn data_type_label_float64() {
+        assert_eq!(data_type_label(&DataType::Float64), "float64");
+    }
+
+    #[test]
+    fn compare_values_string_greater() {
+        use std::cmp::Ordering::*;
+        assert_eq!(compare_values(&json!("z"), &json!("a")), Greater);
+    }
+
+    #[test]
+    fn merge_max_none_takes_first() {
+        assert_eq!(merge_max(None, json!(1)), json!(1));
+    }
 }
