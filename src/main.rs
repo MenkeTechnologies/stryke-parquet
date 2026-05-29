@@ -1218,4 +1218,52 @@ mod tests {
     fn merge_max_string_lex() {
         assert_eq!(merge_max(Some(json!("a")), json!("z")), json!("z"));
     }
+
+    // ─── parse_compression error/alias contract pins ─────────────────
+    //
+    // Codec aliases (`gz`, `lz4_raw`, `none`) are the CLI-visible
+    // surface; the error message for unknown codecs is what users see
+    // first when typoing. Pin both.
+
+    #[test]
+    fn parse_compression_unknown_error_echoes_input() {
+        let err = parse_compression("snazzy").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("snazzy"),
+            "unknown-codec error must echo offending input; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_compression_unknown_error_uses_codec_word() {
+        let err = parse_compression("lzopium").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("codec"),
+            "error should call the input a 'codec' so the user knows what flag it's for; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_compression_canonical_aliases_resolve() {
+        // Every alias accepted by parse must canonicalize to the
+        // expected enum variant. If aliases drift, this trips.
+        for (alias, expected_uncompressed) in [
+            ("gz", false),
+            ("gzip", false),
+            ("lz4_raw", false),
+            ("lz4", false),
+            ("none", true),
+            ("uncompressed", true),
+        ] {
+            let got = parse_compression(alias).unwrap();
+            let is_uncompressed = matches!(got, Compression::UNCOMPRESSED);
+            assert_eq!(
+                is_uncompressed, expected_uncompressed,
+                "alias `{alias}` should{} be UNCOMPRESSED",
+                if expected_uncompressed { "" } else { " not" }
+            );
+        }
+    }
 }
