@@ -1260,10 +1260,99 @@ mod tests {
             let got = parse_compression(alias).unwrap();
             let is_uncompressed = matches!(got, Compression::UNCOMPRESSED);
             assert_eq!(
-                is_uncompressed, expected_uncompressed,
+                is_uncompressed,
+                expected_uncompressed,
                 "alias `{alias}` should{} be UNCOMPRESSED",
                 if expected_uncompressed { "" } else { " not" }
             );
+        }
+    }
+
+    // ─── clap parsing — Cli top-level + Cmd routing ─────────────────────
+    // Pin the inspector CLI contract: required positionals, default head
+    // size, default compression codec on Compress. Drift here would
+    // silently change which preview rows appear or which codec rewrites.
+
+    fn parse_cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut argv = vec!["stryke-parquet-helper"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv)
+    }
+
+    #[test]
+    fn cli_inspect_requires_path_positional() {
+        // Cli derives Debug, so unwrap_err is fine here.
+        let err = parse_cli(&["inspect"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn cli_head_default_n_is_ten() {
+        // Pin: `head file.parquet` previews 10 rows — same as `head -n 10`
+        // unix convention. Drift here would change one-liner UX.
+        let cli = parse_cli(&["head", "/tmp/a.parquet"]).expect("parse");
+        match cli.cmd {
+            Cmd::Head { n, columns, .. } => {
+                assert_eq!(n, 10);
+                assert!(columns.is_none(), "no --columns = full projection");
+            }
+            _ => panic!("expected Head"),
+        }
+    }
+
+    #[test]
+    fn cli_tail_default_n_is_ten() {
+        let cli = parse_cli(&["tail", "/tmp/a.parquet"]).expect("parse");
+        match cli.cmd {
+            Cmd::Tail { n, .. } => assert_eq!(n, 10),
+            _ => panic!("expected Tail"),
+        }
+    }
+
+    #[test]
+    fn cli_compress_default_codec_is_zstd() {
+        // Pin: zstd is the modern default (better ratio than snappy at
+        // similar CPU). A drift back to snappy would silently change
+        // output file sizes for every callsite that omits --codec.
+        let cli = parse_cli(&["compress", "/tmp/a.parquet", "/tmp/b.parquet"]).expect("parse");
+        match cli.cmd {
+            Cmd::Compress {
+                codec, row_group, ..
+            } => {
+                assert_eq!(codec, "zstd");
+                assert!(
+                    row_group.is_none(),
+                    "no --row-group = preserve source layout"
+                );
+            }
+            _ => panic!("expected Compress"),
+        }
+    }
+
+    #[test]
+    fn cli_to_csv_default_output_is_dash_stdout() {
+        // Pin: `to-csv` defaults to stdout (per `default_value = "-"`).
+        // Drift to a file would clobber on each invocation.
+        let cli = parse_cli(&["to-csv", "/tmp/a.parquet"]).expect("parse");
+        match cli.cmd {
+            Cmd::ToCsv { output, .. } => assert_eq!(output, "-"),
+            _ => panic!("expected ToCsv"),
+        }
+    }
+
+    #[test]
+    fn cli_stats_column_optional() {
+        // Pin: bare `stats file` covers all columns; --column narrows.
+        let cli = parse_cli(&["stats", "/tmp/a.parquet"]).expect("parse");
+        match cli.cmd {
+            Cmd::Stats { column, .. } => assert!(column.is_none()),
+            _ => panic!("expected Stats"),
+        }
+        let cli =
+            parse_cli(&["stats", "/tmp/a.parquet", "--column", "id"]).expect("parse with col");
+        match cli.cmd {
+            Cmd::Stats { column, .. } => assert_eq!(column.as_deref(), Some("id")),
+            _ => panic!("expected Stats"),
         }
     }
 }
