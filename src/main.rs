@@ -127,12 +127,17 @@ fn run() -> Result<()> {
         Cmd::Stats { path, column } => cmd_stats(&path, column.as_deref()),
         Cmd::Count { path } => cmd_count(&path),
         Cmd::ToJson { path, columns } => cmd_head(&path, usize::MAX, columns.as_deref()),
-        Cmd::ToCsv { path, output, columns } => {
-            cmd_to_csv(&path, &output, columns.as_deref())
-        }
-        Cmd::Compress { src, dst, codec, row_group } => {
-            cmd_compress(&src, &dst, &codec, row_group)
-        }
+        Cmd::ToCsv {
+            path,
+            output,
+            columns,
+        } => cmd_to_csv(&path, &output, columns.as_deref()),
+        Cmd::Compress {
+            src,
+            dst,
+            codec,
+            row_group,
+        } => cmd_compress(&src, &dst, &codec, row_group),
         Cmd::Mkdemo { path } => cmd_mkdemo(&path),
     }
 }
@@ -156,10 +161,7 @@ fn cmd_mkdemo(path: &Path) -> Result<()> {
         None,
         Some(5.5),
     ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![ids, names, scores],
-    )?;
+    let batch = RecordBatch::try_new(schema.clone(), vec![ids, names, scores])?;
     let file = File::create(path)?;
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
@@ -373,8 +375,7 @@ fn open_batches(
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(batch_size);
     if let Some(cols) = columns {
         let schema = builder.parquet_schema();
-        let mask =
-            parquet::arrow::ProjectionMask::columns(schema, cols.iter().map(|s| s.as_str()));
+        let mask = parquet::arrow::ProjectionMask::columns(schema, cols.iter().map(|s| s.as_str()));
         builder = builder.with_projection(mask);
     }
     Ok(Box::new(builder.build()?))
@@ -382,14 +383,14 @@ fn open_batches(
 
 fn cmd_head(path: &Path, n: usize, columns: Option<&str>) -> Result<()> {
     let cols = parse_columns(columns);
-    let mut reader = open_batches(path, cols.as_deref(), 8192)?;
+    let reader = open_batches(path, cols.as_deref(), 8192)?;
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
     let mut writer = JsonWriterBuilder::new()
         .with_explicit_nulls(true)
         .build::<_, LineDelimited>(&mut out);
     let mut emitted: usize = 0;
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let mut batch = batch?;
         let remaining = n.saturating_sub(emitted);
         if remaining == 0 {
@@ -418,7 +419,7 @@ fn cmd_tail(path: &Path, n: usize, columns: Option<&str>) -> Result<()> {
     let skip = total.saturating_sub(n);
 
     let cols = parse_columns(columns);
-    let mut reader = open_batches(path, cols.as_deref(), 8192)?;
+    let reader = open_batches(path, cols.as_deref(), 8192)?;
 
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
@@ -426,7 +427,7 @@ fn cmd_tail(path: &Path, n: usize, columns: Option<&str>) -> Result<()> {
         .with_explicit_nulls(true)
         .build::<_, LineDelimited>(&mut out);
     let mut seen: usize = 0;
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let batch = batch?;
         let batch_rows = batch.num_rows();
         let batch_start = seen;
@@ -435,11 +436,7 @@ fn cmd_tail(path: &Path, n: usize, columns: Option<&str>) -> Result<()> {
         if batch_end <= skip {
             continue;
         }
-        let local_start = if skip > batch_start {
-            skip - batch_start
-        } else {
-            0
-        };
+        let local_start = skip.saturating_sub(batch_start);
         let slice = batch.slice(local_start, batch_rows - local_start);
         writer.write(&slice)?;
     }
@@ -449,7 +446,7 @@ fn cmd_tail(path: &Path, n: usize, columns: Option<&str>) -> Result<()> {
 
 fn cmd_to_csv(path: &Path, output: &str, columns: Option<&str>) -> Result<()> {
     let cols = parse_columns(columns);
-    let mut reader = open_batches(path, cols.as_deref(), 8192)?;
+    let reader = open_batches(path, cols.as_deref(), 8192)?;
     let writer: Box<dyn Write> = if output == "-" {
         let stdout = io::stdout();
         Box::new(BufWriter::new(stdout.lock()))
@@ -457,20 +454,15 @@ fn cmd_to_csv(path: &Path, output: &str, columns: Option<&str>) -> Result<()> {
         Box::new(BufWriter::new(File::create(output)?))
     };
     let mut csv_writer = CsvWriterBuilder::new().with_header(true).build(writer);
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let batch = batch?;
         csv_writer.write(&batch)?;
     }
     Ok(())
 }
 
-fn cmd_compress(
-    src: &Path,
-    dst: &Path,
-    codec: &str,
-    row_group: Option<usize>,
-) -> Result<()> {
-    let mut reader = open_batches(src, None, 8192)?;
+fn cmd_compress(src: &Path, dst: &Path, codec: &str, row_group: Option<usize>) -> Result<()> {
+    let reader = open_batches(src, None, 8192)?;
     let schema = reader.schema();
     let compression = parse_compression(codec)?;
     let mut props = WriterProperties::builder().set_compression(compression);
@@ -480,7 +472,7 @@ fn cmd_compress(
     let file = File::create(dst)?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(props.build()))?;
     let mut rows: i64 = 0;
-    while let Some(batch) = reader.next() {
+    for batch in reader {
         let batch = batch?;
         rows += batch.num_rows() as i64;
         writer.write(&batch)?;
@@ -593,10 +585,12 @@ fn stats_min_value(s: &Statistics) -> Option<Value> {
         Statistics::Int64(v) => v.min_opt().map(|x| json!(x)),
         Statistics::Float(v) => v.min_opt().map(|x| json!(x)),
         Statistics::Double(v) => v.min_opt().map(|x| json!(x)),
-        Statistics::ByteArray(v) => v.min_opt().map(|x| json!(String::from_utf8_lossy(x.data()))),
-        Statistics::FixedLenByteArray(v) => {
-            v.min_opt().map(|x| json!(String::from_utf8_lossy(x.data())))
-        }
+        Statistics::ByteArray(v) => v
+            .min_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
+        Statistics::FixedLenByteArray(v) => v
+            .min_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
         Statistics::Int96(_) => None,
     }
 }
@@ -608,10 +602,12 @@ fn stats_max_value(s: &Statistics) -> Option<Value> {
         Statistics::Int64(v) => v.max_opt().map(|x| json!(x)),
         Statistics::Float(v) => v.max_opt().map(|x| json!(x)),
         Statistics::Double(v) => v.max_opt().map(|x| json!(x)),
-        Statistics::ByteArray(v) => v.max_opt().map(|x| json!(String::from_utf8_lossy(x.data()))),
-        Statistics::FixedLenByteArray(v) => {
-            v.max_opt().map(|x| json!(String::from_utf8_lossy(x.data())))
-        }
+        Statistics::ByteArray(v) => v
+            .max_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
+        Statistics::FixedLenByteArray(v) => v
+            .max_opt()
+            .map(|x| json!(String::from_utf8_lossy(x.data()))),
         Statistics::Int96(_) => None,
     }
 }
@@ -682,10 +678,7 @@ mod tests {
 
     #[test]
     fn parse_columns_filters_empty_segments() {
-        assert_eq!(
-            parse_columns(Some("a,,b,")).unwrap(),
-            vec!["a", "b"]
-        );
+        assert_eq!(parse_columns(Some("a,,b,")).unwrap(), vec!["a", "b"]);
     }
 
     #[test]
@@ -698,20 +691,38 @@ mod tests {
     #[test]
     fn parse_compression_known_codecs() {
         assert_eq!(parse_compression("snappy").unwrap(), Compression::SNAPPY);
-        assert_eq!(parse_compression("none").unwrap(), Compression::UNCOMPRESSED);
-        assert_eq!(parse_compression("uncompressed").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(
+            parse_compression("none").unwrap(),
+            Compression::UNCOMPRESSED
+        );
+        assert_eq!(
+            parse_compression("uncompressed").unwrap(),
+            Compression::UNCOMPRESSED
+        );
         assert_eq!(parse_compression("lz4").unwrap(), Compression::LZ4_RAW);
         assert_eq!(parse_compression("lz4_raw").unwrap(), Compression::LZ4_RAW);
         // gz alias for gzip.
-        assert!(matches!(parse_compression("gz").unwrap(), Compression::GZIP(_)));
-        assert!(matches!(parse_compression("zstd").unwrap(), Compression::ZSTD(_)));
-        assert!(matches!(parse_compression("brotli").unwrap(), Compression::BROTLI(_)));
+        assert!(matches!(
+            parse_compression("gz").unwrap(),
+            Compression::GZIP(_)
+        ));
+        assert!(matches!(
+            parse_compression("zstd").unwrap(),
+            Compression::ZSTD(_)
+        ));
+        assert!(matches!(
+            parse_compression("brotli").unwrap(),
+            Compression::BROTLI(_)
+        ));
     }
 
     #[test]
     fn parse_compression_case_insensitive() {
         assert_eq!(parse_compression("SNAPPY").unwrap(), Compression::SNAPPY);
-        assert_eq!(parse_compression("Zstd").unwrap_or(Compression::SNAPPY), parse_compression("zstd").unwrap_or(Compression::SNAPPY));
+        assert_eq!(
+            parse_compression("Zstd").unwrap_or(Compression::SNAPPY),
+            parse_compression("zstd").unwrap_or(Compression::SNAPPY)
+        );
     }
 
     #[test]
@@ -741,14 +752,23 @@ mod tests {
 
     #[test]
     fn data_type_label_decimals() {
-        assert_eq!(data_type_label(&DataType::Decimal128(18, 6)), "decimal128(18,6)");
-        assert_eq!(data_type_label(&DataType::Decimal256(38, 10)), "decimal256(38,10)");
+        assert_eq!(
+            data_type_label(&DataType::Decimal128(18, 6)),
+            "decimal128(18,6)"
+        );
+        assert_eq!(
+            data_type_label(&DataType::Decimal256(38, 10)),
+            "decimal256(38,10)"
+        );
     }
 
     #[test]
     fn data_type_label_list_nests() {
         let inner = Field::new("item", DataType::Int32, true);
-        assert_eq!(data_type_label(&DataType::List(Arc::new(inner))), "list<int32>");
+        assert_eq!(
+            data_type_label(&DataType::List(Arc::new(inner))),
+            "list<int32>"
+        );
     }
 
     #[test]
@@ -796,8 +816,14 @@ mod tests {
 
     #[test]
     fn merge_min_max_strings_lex_order() {
-        assert_eq!(merge_min(Some(json!("zebra")), json!("apple")), json!("apple"));
-        assert_eq!(merge_max(Some(json!("apple")), json!("zebra")), json!("zebra"));
+        assert_eq!(
+            merge_min(Some(json!("zebra")), json!("apple")),
+            json!("apple")
+        );
+        assert_eq!(
+            merge_max(Some(json!("apple")), json!("zebra")),
+            json!("zebra")
+        );
     }
 
     // ─── emit_ndjson ─────────────────────────────────────────────────
@@ -822,8 +848,8 @@ mod tests {
 
     #[test]
     fn file_size_returns_metadata_len() {
-        let tmp = std::env::temp_dir()
-            .join(format!("stryke-parquet-test-{}.bin", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("stryke-parquet-test-{}.bin", std::process::id()));
         std::fs::write(&tmp, b"abcdefghij").unwrap();
         let got = file_size(&tmp);
         let _ = std::fs::remove_file(&tmp);
@@ -912,8 +938,14 @@ mod tests {
 
     #[test]
     fn parse_compression_gzip_alias() {
-        assert!(matches!(parse_compression("gzip").unwrap(), Compression::GZIP(_)));
-        assert!(matches!(parse_compression("gz").unwrap(), Compression::GZIP(_)));
+        assert!(matches!(
+            parse_compression("gzip").unwrap(),
+            Compression::GZIP(_)
+        ));
+        assert!(matches!(
+            parse_compression("gz").unwrap(),
+            Compression::GZIP(_)
+        ));
     }
 
     #[test]
@@ -1051,8 +1083,14 @@ mod tests {
 
     #[test]
     fn parse_compression_uncompressed_aliases() {
-        assert_eq!(parse_compression("none").unwrap(), Compression::UNCOMPRESSED);
-        assert_eq!(parse_compression("uncompressed").unwrap(), Compression::UNCOMPRESSED);
+        assert_eq!(
+            parse_compression("none").unwrap(),
+            Compression::UNCOMPRESSED
+        );
+        assert_eq!(
+            parse_compression("uncompressed").unwrap(),
+            Compression::UNCOMPRESSED
+        );
     }
 
     #[test]
@@ -1095,7 +1133,10 @@ mod tests {
 
     #[test]
     fn parse_compression_zstd_alias() {
-        assert!(matches!(parse_compression("zstd").unwrap(), Compression::ZSTD(_)));
+        assert!(matches!(
+            parse_compression("zstd").unwrap(),
+            Compression::ZSTD(_)
+        ));
     }
 
     #[test]

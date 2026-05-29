@@ -1,6 +1,6 @@
 [package]
 name = "stryke-parquet-helper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Parquet diagnostic helper binary for the stryke `parquet` package."
 authors = ["MenkeTechnologies"]
