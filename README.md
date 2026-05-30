@@ -236,7 +236,7 @@ Output:
 
 ```sh
 cargo test                                # compiles, no live calls
-s test t/                                 # 10-test self-contained round-trip
+s test t/                                 # self-contained round-trip
 ```
 
 The suite uses `parquet mkdemo` to generate a fixture parquet in `/tmp/`
@@ -260,7 +260,7 @@ stryke-parquet/
   stryke.toml                      # stryke package manifest
   Cargo.toml                       # Rust helper crate manifest
   Makefile
-  src/main.rs                      # single-file helper (~600 LOC)
+  src/main.rs                      # single-file helper
   lib/
     Parquet.stk                    # `use Parquet`
   bin/
@@ -273,7 +273,7 @@ stryke-parquet/
     head_stats.stk
     recompress.stk
   .github/workflows/
-    ci.yml                         # mkdemo + 10 diagnostic ops
+    ci.yml                         # mkdemo + diagnostic ops
     release.yml                    # cross-compile + GH release on tag push
 ```
 
