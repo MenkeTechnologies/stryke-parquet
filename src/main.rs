@@ -1355,4 +1355,138 @@ mod tests {
             _ => panic!("expected Stats"),
         }
     }
+
+    // ─── clap parsing — additional Cmd surfaces (round 2) ──────────────
+    // Previous round pinned inspect/head/tail/compress/to-csv/stats.
+    // These pin: (a) Schema/Rowgroups/Count/ToJson/Mkdemo single-positional
+    // contract; (b) Compress requires BOTH src+dst (the convert pair) +
+    // --row-group threads through Option<usize>; (c) Head/Tail/ToJson
+    // --columns flag threads through; (d) Compress with codec validation
+    // is downstream of clap — only the string is captured at parse time;
+    // (e) Head custom --n positive value binds correctly.
+
+    #[test]
+    fn cli_schema_rowgroups_count_to_json_each_require_path() {
+        // Pin: every footer-reading subcommand requires its path positional.
+        use clap::error::ErrorKind::MissingRequiredArgument;
+        assert_eq!(
+            parse_cli(&["schema"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["rowgroups"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["count"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["to-json"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["mkdemo"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+
+        // Positive bind: each routes correctly with one positional.
+        let cli = parse_cli(&["schema", "/tmp/a.parquet"]).expect("parse");
+        match cli.cmd {
+            Cmd::Schema { path } => assert_eq!(path, PathBuf::from("/tmp/a.parquet")),
+            _ => panic!("expected Schema"),
+        }
+    }
+
+    #[test]
+    fn cli_compress_requires_both_src_and_dst_positionals() {
+        // Pin: compress is a convert pair (read src, write dst). Drift to
+        // one-positional would silently overwrite the input on every call.
+        use clap::error::ErrorKind::MissingRequiredArgument;
+        assert_eq!(
+            parse_cli(&["compress"]).unwrap_err().kind(),
+            MissingRequiredArgument
+        );
+        assert_eq!(
+            parse_cli(&["compress", "/tmp/a.parquet"])
+                .unwrap_err()
+                .kind(),
+            MissingRequiredArgument
+        );
+        let cli = parse_cli(&["compress", "/tmp/in.parquet", "/tmp/out.parquet"]).expect("parse");
+        match cli.cmd {
+            Cmd::Compress { src, dst, .. } => {
+                assert_eq!(src, PathBuf::from("/tmp/in.parquet"));
+                assert_eq!(dst, PathBuf::from("/tmp/out.parquet"));
+            }
+            _ => panic!("expected Compress"),
+        }
+    }
+
+    #[test]
+    fn cli_compress_codec_override_and_row_group_thread_through() {
+        // Pin: --codec overrides the zstd default; --row-group binds to
+        // Option<usize>. Validation against parse_compression is
+        // downstream of clap (covered in pure-helper tests).
+        let cli = parse_cli(&[
+            "compress",
+            "/tmp/a.parquet",
+            "/tmp/b.parquet",
+            "--codec",
+            "snappy",
+            "--row-group",
+            "131072",
+        ])
+        .expect("parse");
+        match cli.cmd {
+            Cmd::Compress {
+                codec, row_group, ..
+            } => {
+                assert_eq!(codec, "snappy");
+                assert_eq!(row_group, Some(131072));
+            }
+            _ => panic!("expected Compress"),
+        }
+    }
+
+    #[test]
+    fn cli_head_tail_to_json_columns_flag_threads_through() {
+        // Pin: --columns="id,name" lands as Some("id,name") on Head/Tail/
+        // ToJson. Drift to silently-dropped projection would scan/emit
+        // every column on every preview.
+        let cli = parse_cli(&["head", "/tmp/a.parquet", "--n", "3", "--columns", "id,name"])
+            .expect("parse");
+        match cli.cmd {
+            Cmd::Head { n, columns, .. } => {
+                assert_eq!(n, 3);
+                assert_eq!(columns.as_deref(), Some("id,name"));
+            }
+            _ => panic!("expected Head"),
+        }
+        let cli = parse_cli(&["tail", "/tmp/a.parquet", "--columns", "score"]).expect("parse");
+        match cli.cmd {
+            Cmd::Tail { columns, .. } => assert_eq!(columns.as_deref(), Some("score")),
+            _ => panic!("expected Tail"),
+        }
+        let cli = parse_cli(&["to-json", "/tmp/a.parquet", "--columns", "id"]).expect("parse");
+        match cli.cmd {
+            Cmd::ToJson { columns, .. } => assert_eq!(columns.as_deref(), Some("id")),
+            _ => panic!("expected ToJson"),
+        }
+    }
+
+    #[test]
+    fn cli_to_csv_output_override_routes_to_filepath() {
+        // Pin: --output binds the captured destination string. Default is
+        // "-" (covered in round 1); override changes the routing target.
+        let cli =
+            parse_cli(&["to-csv", "/tmp/a.parquet", "--output", "/tmp/out.csv"]).expect("parse");
+        match cli.cmd {
+            Cmd::ToCsv { output, path, .. } => {
+                assert_eq!(output, "/tmp/out.csv");
+                assert_eq!(path, PathBuf::from("/tmp/a.parquet"));
+            }
+            _ => panic!("expected ToCsv"),
+        }
+    }
 }
