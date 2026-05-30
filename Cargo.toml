@@ -6,6 +6,7 @@ description = "Parquet diagnostic helper binary for the stryke `parquet` package
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-parquet"
+homepage = "https://menketechnologies.github.io/stryke-parquet/"
 publish = false
 
 [[bin]]
