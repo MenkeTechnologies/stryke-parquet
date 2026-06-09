@@ -40,10 +40,36 @@ fn open_parquet_reader(
     path: &Path,
     batch_size: usize,
 ) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader> {
+    open_parquet_reader_with_columns(path, batch_size, None)
+}
+
+/// Open a parquet reader with an optional column projection. When `columns`
+/// is `Some(names)`, only those columns are decoded — every other column is
+/// skipped at the parquet level (no Arrow filter, no wasted decode cost).
+fn open_parquet_reader_with_columns(
+    path: &Path,
+    batch_size: usize,
+    columns: Option<&[String]>,
+) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader> {
     let file =
         File::open(path).with_context(|| format!("opening parquet file `{}`", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(batch_size);
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(batch_size);
+    if let Some(names) = columns {
+        let mask = parquet::arrow::ProjectionMask::columns(
+            builder.parquet_schema(),
+            names.iter().map(|s| s.as_str()),
+        );
+        builder = builder.with_projection(mask);
+    }
     Ok(builder.build()?)
+}
+
+fn parse_columns(v: &Value) -> Option<Vec<String>> {
+    v.as_array().map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect()
+    })
 }
 
 fn open_serialized(path: &Path) -> Result<SerializedFileReader<File>> {
@@ -151,7 +177,7 @@ fn op_schema(args: Value) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({"fields": fields}))
+    Ok(json!({"num_fields": fields.len(), "fields": fields}))
 }
 
 fn op_count(args: Value) -> Result<Value> {
@@ -233,7 +259,8 @@ fn op_head(args: Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow!("missing path"))?;
     let n = args["n"].as_u64().unwrap_or(10) as usize;
-    let reader = open_parquet_reader(Path::new(path), 8192)?;
+    let cols = parse_columns(&args["columns"]);
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, cols.as_deref())?;
     let mut buf = Vec::<u8>::new();
     {
         let mut w = JsonWriterBuilder::new()
@@ -262,12 +289,20 @@ fn op_tail(args: Value) -> Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow!("missing path"))?;
     let n = args["n"].as_u64().unwrap_or(10) as usize;
+    let cols = parse_columns(&args["columns"]);
     // Read only the last row group for efficiency.
     let file = File::open(path)?;
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(8192);
     let num_groups = builder.metadata().num_row_groups();
     if num_groups > 0 {
         builder = builder.with_row_groups(vec![num_groups - 1]);
+    }
+    if let Some(names) = &cols {
+        let mask = parquet::arrow::ProjectionMask::columns(
+            builder.parquet_schema(),
+            names.iter().map(|s| s.as_str()),
+        );
+        builder = builder.with_projection(mask);
     }
     let reader = builder.build()?;
     let mut batches: Vec<RecordBatch> = Vec::new();
@@ -384,7 +419,12 @@ fn op_compress(args: Value) -> Result<Value> {
         w.write(&b)?;
     }
     w.close()?;
-    Ok(json!({"dst": dst, "rows": rows, "compression": compression}))
+    Ok(json!({
+        "dst": dst,
+        "rows": rows,
+        "num_rows": rows,
+        "compression": compression,
+    }))
 }
 
 fn op_mkdemo(args: Value) -> Result<Value> {

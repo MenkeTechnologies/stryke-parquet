@@ -69,19 +69,25 @@ fn Parquet::stats ($path, %opts) {
 
 # ── row data ─────────────────────────────────────────────────────────
 
-## First N rows as hashrefs.
+## First N rows as hashrefs. Pass `columns => [...]` to project at the
+## parquet level (skips the decode cost of unprojected columns).
 fn Parquet::head ($path, %opts) {
     die "Parquet::head: file `$path` not found" unless -e $path
     val $n = $opts{n} // 10
-    val $o = Parquet::_decode("head", parquet__head(to_json({ path => $path, n => $n })))
+    var %req = (path => $path, n => $n)
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("head", parquet__head(to_json(\%req)))
     @{ $o->{rows} }
 }
 
-## Last N rows as hashrefs (reads only the trailing row group).
+## Last N rows as hashrefs (reads only the trailing row group). Pass
+## `columns => [...]` for column projection.
 fn Parquet::tail ($path, %opts) {
     die "Parquet::tail: file `$path` not found" unless -e $path
     val $n = $opts{n} // 10
-    val $o = Parquet::_decode("tail", parquet__tail(to_json({ path => $path, n => $n })))
+    var %req = (path => $path, n => $n)
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("tail", parquet__tail(to_json(\%req)))
     @{ $o->{rows} }
 }
 
