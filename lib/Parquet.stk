@@ -15,7 +15,7 @@ package Parquet
 
 ## Decode the cdylib's JSON return; die on `{error}` payload.
 fn Parquet::_decode ($name, $json) {
-    my $o = from_json $json
+    val $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
         die "Parquet::$name: $o->{error}"
     }
@@ -26,7 +26,7 @@ fn Parquet::_decode ($name, $json) {
 
 ## Return the package version string.
 fn Parquet::version {
-    my $o = Parquet::_decode("version", parquet__version("{}"))
+    val $o = Parquet::_decode("version", parquet__version("{}"))
     $o->{version}
 }
 
@@ -53,14 +53,14 @@ fn Parquet::count ($path) {
 ## Per-row-group breakdown: rows, byte size, column count.
 fn Parquet::rowgroups ($path) {
     die "Parquet::rowgroups: file `$path` not found" unless -e $path
-    my $o = Parquet::_decode("rowgroups", parquet__rowgroups(to_json({ path => $path })))
+    val $o = Parquet::_decode("rowgroups", parquet__rowgroups(to_json({ path => $path })))
     @{ $o->{row_groups} }
 }
 
 ## Per-column footer stats (null count, min, max). Opt `column => name`.
 fn Parquet::stats ($path, %opts) {
     die "Parquet::stats: file `$path` not found" unless -e $path
-    my $o = Parquet::_decode("stats", parquet__stats(to_json({ path => $path })))
+    val $o = Parquet::_decode("stats", parquet__stats(to_json({ path => $path })))
     if (defined $opts{column}) {
         return grep { $_->{name} eq $opts{column} } @{ $o->{columns} }
     }
@@ -72,23 +72,23 @@ fn Parquet::stats ($path, %opts) {
 ## First N rows as hashrefs.
 fn Parquet::head ($path, %opts) {
     die "Parquet::head: file `$path` not found" unless -e $path
-    my $n = $opts{n} // 10
-    my $o = Parquet::_decode("head", parquet__head(to_json({ path => $path, n => $n })))
+    val $n = $opts{n} // 10
+    val $o = Parquet::_decode("head", parquet__head(to_json({ path => $path, n => $n })))
     @{ $o->{rows} }
 }
 
 ## Last N rows as hashrefs (reads only the trailing row group).
 fn Parquet::tail ($path, %opts) {
     die "Parquet::tail: file `$path` not found" unless -e $path
-    my $n = $opts{n} // 10
-    my $o = Parquet::_decode("tail", parquet__tail(to_json({ path => $path, n => $n })))
+    val $n = $opts{n} // 10
+    val $o = Parquet::_decode("tail", parquet__tail(to_json({ path => $path, n => $n })))
     @{ $o->{rows} }
 }
 
 ## All rows as hashrefs. Opt `limit`.
 fn Parquet::to_json ($path, %opts) {
     die "Parquet::to_json: file `$path` not found" unless -e $path
-    my $o = Parquet::_decode("to_json", parquet__to_json(to_json({ path => $path, limit => $opts{limit} })))
+    val $o = Parquet::_decode("to_json", parquet__to_json(to_json({ path => $path, limit => $opts{limit} })))
     @{ $o->{rows} }
 }
 
@@ -97,10 +97,10 @@ fn Parquet::to_json ($path, %opts) {
 ## latency, so buffered iteration is equivalent in throughput.
 fn Parquet::stream ($path, %opts) {
     die "Parquet::stream: callback => sub { … } required" unless defined $opts{callback}
-    my $cb = $opts{callback}
-    my @rows = Parquet::to_json($path, %opts)
-    my $n = 0
-    for my $row (@rows) {
+    val $cb = $opts{callback}
+    val @rows = Parquet::to_json($path, %opts)
+    var $n = 0
+    for val $row (@rows) {
         $cb->($row)
         $n++
     }
@@ -112,7 +112,7 @@ fn Parquet::stream ($path, %opts) {
 fn Parquet::to_csv ($path, %opts) {
     die "Parquet::to_csv: file `$path` not found" unless -e $path
     die "Parquet::to_csv: output => PATH required" unless defined $opts{output}
-    my $r = Parquet::_decode("to_csv",
+    val $r = Parquet::_decode("to_csv",
         parquet__to_csv(to_json({ path => $path, dst => $opts{output}, header => ($opts{header} // 1) })))
     $r->{path}
 }

@@ -5,30 +5,30 @@
 
 use Parquet
 
-my $have_cdylib = eval { Parquet::version(); 1 }
+val $have_cdylib = eval { Parquet::version(); 1 }
 unless ($have_cdylib) {
     p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 
-my $tmp = "/tmp/stryke-parquet-test-$$"
+val $tmp = "/tmp/stryke-parquet-test-$$"
 mkdir $tmp unless -d $tmp
-my $path = "$tmp/demo.parquet"
-my $path2 = "$tmp/demo-snap.parquet"
+val $path = "$tmp/demo.parquet"
+val $path2 = "$tmp/demo-snap.parquet"
 
 Parquet::_mkdemo($path)
 
 p "1..10"
-my $i = 0
+var $i = 0
 
 # 1. count
-my $n
+var $n
 eval { $n = Parquet::count($path) }
 $i++
 p $@ ? "not ok $i - count: $@" : ($n == 5 ? "ok $i - count" : "not ok $i - count=$n")
 
 # 2. inspect
-my $info
+var $info
 eval { $info = Parquet::inspect($path) }
 $i++
 p $@ ? "not ok $i - inspect: $@" :
@@ -37,7 +37,7 @@ p $@ ? "not ok $i - inspect: $@" :
             : "not ok $i - inspect bad shape")
 
 # 3. schema
-my $sch
+var $sch
 eval { $sch = Parquet::schema($path) }
 $i++
 p $@ ? "not ok $i - schema: $@" :
@@ -45,7 +45,7 @@ p $@ ? "not ok $i - schema: $@" :
         "not ok $i - schema fields=$sch->{num_fields}")
 
 # 4. head 2
-my @first
+var @first
 eval { @first = Parquet::head($path, n => 2) }
 $i++
 p $@ ? "not ok $i - head: $@" :
@@ -54,7 +54,7 @@ p $@ ? "not ok $i - head: $@" :
             : "not ok $i - head wrong")
 
 # 5. tail 2
-my @last
+var @last
 eval { @last = Parquet::tail($path, n => 2) }
 $i++
 p $@ ? "not ok $i - tail: $@" :
@@ -63,7 +63,7 @@ p $@ ? "not ok $i - tail: $@" :
             : "not ok $i - tail wrong: " . to_json(\@last))
 
 # 6. rowgroups
-my @rgs
+var @rgs
 eval { @rgs = Parquet::rowgroups($path) }
 $i++
 p $@ ? "not ok $i - rowgroups: $@" :
@@ -72,7 +72,7 @@ p $@ ? "not ok $i - rowgroups: $@" :
             : "not ok $i - rowgroups bad shape")
 
 # 7. stats all columns (3 lines)
-my @stats
+var @stats
 eval { @stats = Parquet::stats($path) }
 $i++
 p $@ ? "not ok $i - stats: $@" :
@@ -80,7 +80,7 @@ p $@ ? "not ok $i - stats: $@" :
         "not ok $i - stats got " . len(@stats))
 
 # 8. stats single column with null count
-my @scol
+var @scol
 eval { @scol = Parquet::stats($path, column => "score") }
 $i++
 p $@ ? "not ok $i - stats(score): $@" :
@@ -89,7 +89,7 @@ p $@ ? "not ok $i - stats(score): $@" :
             : "not ok $i - stats(score) wrong: " . to_json(\@scol))
 
 # 9. column projection in head
-my @proj
+var @proj
 eval { @proj = Parquet::head($path, n => 1, columns => ["id", "name"]) }
 $i++
 p $@ ? "not ok $i - head projection: $@" :
@@ -98,7 +98,7 @@ p $@ ? "not ok $i - head projection: $@" :
             : "not ok $i - head projection got: " . to_json($proj[0]))
 
 # 10. compress to snappy
-my $cr
+var $cr
 eval { $cr = Parquet::compress($path, $path2, codec => "snappy") }
 $i++
 p $@ ? "not ok $i - compress: $@" :

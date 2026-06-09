@@ -4,16 +4,16 @@
 
 use Parquet
 
-my $path = $ARGV[0]
+val $path = $ARGV[0]
 die "usage: inspect.stk PATH.parquet\n" unless defined $path
 
-my $info = Parquet::inspect $path
+val $info = Parquet::inspect $path
 p sprintf("rows=%d  row_groups=%d  cols=%d  size=%d (%.1f%% of raw)",
           $info->{num_rows}, $info->{num_row_groups}, $info->{num_columns},
           $info->{file_size},
           100.0 * ($info->{compression_ratio} // 0))
 p "created by: " . ($info->{created_by} // "?")
 p "compressions:"
-for my $k (sort keys %{ $info->{compressions} }) {
+for val $k (sort keys %{ $info->{compressions} }) {
     p "  $k → $info->{compressions}{$k} column-chunks"
 }

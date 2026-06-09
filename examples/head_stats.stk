@@ -4,25 +4,25 @@
 
 use Parquet
 
-my $path = $ARGV[0]
+val $path = $ARGV[0]
 die "usage: head_stats.stk PATH.parquet\n" unless defined $path
 
 p "=== schema ==="
-my $sch = Parquet::schema $path
-for my $f (@{ $sch->{fields} }) {
+val $sch = Parquet::schema $path
+for val $f (@{ $sch->{fields} }) {
     p sprintf("  %-30s %s%s", $f->{name}, $f->{type},
               $f->{nullable} ? "" : " NOT NULL")
 }
 
 p "=== head 5 ==="
-my @rows = Parquet::head $path, n => 5
-for my $r (@rows) {
+val @rows = Parquet::head $path, n => 5
+for val $r (@rows) {
     p to_json $r
 }
 
 p "=== column stats ==="
-my @stats = Parquet::stats $path
-for my $s (@stats) {
+val @stats = Parquet::stats $path
+for val $s (@stats) {
     p sprintf("  %-20s nulls=%-6d  min=%-15s  max=%s",
               $s->{name}, $s->{null_count} // 0,
               to_json($s->{min}), to_json($s->{max}))
