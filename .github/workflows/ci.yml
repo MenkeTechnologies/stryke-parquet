@@ -63,30 +63,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --no-fail-fast
 
-  helper-round-trip:
-    name: Helper round-trip (mkdemo + diagnostics)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
-      - name: 10-op round-trip
-        run: |
-          set -euo pipefail
-          H=./target/release/stryke-parquet-helper
-          $H mkdemo /tmp/sp.parquet | jq -e '.num_rows == 5'
-          $H count    /tmp/sp.parquet | jq -e '.num_rows == 5'
-          $H inspect  /tmp/sp.parquet | jq -e '.num_columns == 3 and .num_row_groups == 1'
-          $H schema   /tmp/sp.parquet | jq -e '.num_fields == 3'
-          $H head     /tmp/sp.parquet --n=2 | wc -l | tr -d ' ' | grep -x 2
-          $H tail     /tmp/sp.parquet --n=1 | jq -e '.name == "eve"'
-          $H rowgroups /tmp/sp.parquet | jq -e '.num_rows == 5'
-          $H stats    /tmp/sp.parquet --column=score | jq -e '.null_count == 1'
-          $H to-csv   /tmp/sp.parquet | head -1 | grep -x 'id,name,score'
-          $H compress /tmp/sp.parquet /tmp/sp-snap.parquet --codec=snappy \
-              | jq -e '.num_rows == 5 and .dst_size > 0'
-
   doc:
     name: Doc
     runs-on: ubuntu-latest
@@ -100,7 +76,7 @@ jobs:
 
   release-build:
     name: Release Build (${{ matrix.target }})
-    needs: [check, test, helper-round-trip]
+    needs: [check, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -122,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: stryke-parquet-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/stryke-parquet-helper
+          path: target/${{ matrix.target }}/release/libstryke_parquet.*
 
   docs-gates:
     name: Docs gates
