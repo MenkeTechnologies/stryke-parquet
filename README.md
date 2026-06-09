@@ -29,9 +29,8 @@ breakdown, head/tail, recompression. Diagnostic counterpart to
 - [\[0x00\] What this is (and what it isn't)](#0x00-what-this-is-and-what-it-isnt)
 - [\[0x01\] Install](#0x01-install)
 - [\[0x02\] Quick start](#0x02-quick-start)
-- [\[0x03\] CLI: `parquet`](#0x03-cli-parquet)
+- [\[0x03\] FFI layer](#0x03-ffi-layer)
 - [\[0x04\] API reference](#0x04-api-reference)
-- [\[0x05\] Helper protocol](#0x05-helper-protocol)
 - [\[0x06\] Supported compression codecs](#0x06-supported-compression-codecs)
 - [\[0x07\] Tests](#0x07-tests)
 - [\[0x08\] Dev workflow](#0x08-dev-workflow)
@@ -57,10 +56,18 @@ artifact you're investigating.
 
 ## [0x01] Install
 
+From a release (no rustc on the consumer machine):
+
+```sh
+s pkg install -g github.com/MenkeTechnologies/stryke-parquet
+```
+
+From a local checkout:
+
 ```sh
 cd ~/projects/stryke-parquet
-cargo build --release            # produces target/release/stryke-parquet-helper
-s pkg install -g .               # installs `parquet` and `parquet-build` CLIs
+cargo build --release            # produces target/release/libstryke_parquet.{dylib,so}
+s pkg install -g .               # installs into ~/.stryke/store/parquet@<version>/
 ```
 
 Or:
@@ -105,26 +112,17 @@ Parquet::compress "events.parquet", "events.zst.parquet",
                   codec => "zstd"                                  # recompress
 ```
 
-## [0x03] CLI: `parquet`
+## [0x03] FFI layer
 
-```sh
-parquet inspect    events.parquet
-parquet schema     events.parquet
-parquet count      events.parquet
-parquet rowgroups  events.parquet
-parquet stats      events.parquet [--column=COL]
+Each `Parquet::*` wrapper builds a JSON args dict and calls a sibling
+`parquet__*` symbol resolved out of `libstryke_parquet.{dylib,so}`. The
+cdylib is dlopened in-process on first `use Parquet` (via stryke's
+`pkg::commands::try_load_ffi_for` resolver hook) and exposes 11 entry
+points: `version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
+`head`, `tail`, `to_json`, `to_csv`, `compress`, `mkdemo`.
 
-parquet head       events.parquet --n=20 [--columns=a,b]
-parquet tail       events.parquet --n=5
-parquet to-json    events.parquet [--columns=a,b]
-parquet to-csv     events.parquet [--output=PATH] [--columns=a,b]
-
-parquet compress   in.parquet out.parquet --codec=zstd [--row-group=N]
-parquet mkdemo     /tmp/demo.parquet       # tiny test fixture
-
-parquet build                               # cargo build --release
-parquet version
-```
+Stateless package — parquet operations are file transforms; no
+process-level cache.
 
 ## [0x04] API reference
 
@@ -204,23 +202,6 @@ writer wrote it (most parquet writers don't).
 }
 ```
 
-## [0x05] Helper protocol
-
-```sh
-stryke-parquet-helper inspect events.parquet
-stryke-parquet-helper head events.parquet --n=5 --columns=user_id,ts
-stryke-parquet-helper stats events.parquet --column=score
-stryke-parquet-helper compress events.parquet events-zstd.parquet --codec=zstd
-stryke-parquet-helper mkdemo /tmp/demo.parquet
-```
-
-Output:
-
-* `inspect`, `count`, `schema`, `compress`, `mkdemo` → single JSON object
-* `rowgroups`, `stats` → NDJSON lines
-* `head`, `tail`, `to-json` → NDJSON rows
-* `to-csv` → CSV on stdout (or to `--output=PATH`)
-
 ## [0x06] Supported compression codecs
 
 | Codec | Library | Notes |
@@ -258,14 +239,11 @@ make clean
 ```
 stryke-parquet/
   stryke.toml                      # stryke package manifest
-  Cargo.toml                       # Rust helper crate manifest
+  Cargo.toml                       # cdylib crate manifest
   Makefile
-  src/main.rs                      # single-file helper
+  src/lib.rs                       # cdylib — parquet__* extern "C" exports
   lib/
-    Parquet.stk                    # `use Parquet`
-  bin/
-    parquet.stk                    # `parquet` CLI
-    parquet-build.stk
+    Parquet.stk                    # `use Parquet` — thin wrapper around the FFI symbols
   t/
     test_parquet.stk
   examples/

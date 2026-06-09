@@ -6,10 +6,10 @@ all: release
 help:
 	@printf '%s\n' \
 	  'targets:' \
-	  '  make release   - cargo build --release  (default; produces target/release/stryke-parquet-helper)' \
+	  '  make release   - cargo build --release  (default; produces target/release/libstryke_parquet.{dylib,so})' \
 	  '  make debug     - cargo build' \
 	  '  make test      - cargo test then `s test t/`' \
-	  '  make install   - `s pkg install -g .` (registers parquet/parquet-build CLI launchers)' \
+	  '  make install   - `s pkg install -g .` (cdylib lands in ~/.stryke/store/parquet@<ver>/)' \
 	  '  make clean     - cargo clean'
 
 release:

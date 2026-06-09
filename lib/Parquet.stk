@@ -1,284 +1,126 @@
-# lib/Parquet.stk — parquet file inspector for stryke.
+# lib/Parquet.stk — Parquet file inspector + transforms for stryke.
 #
-# Wraps the `stryke-parquet-helper` Rust binary (parquet + arrow crates).
-# Output is JSON (single object) or NDJSON (per-row / per-row-group /
-# per-column streams).
+# Thin wrapper around the `stryke-parquet` cdylib's `parquet__*` exports.
+# The cdylib is dlopened in-process on first `use Parquet` (see stryke's
+# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+# stryke-callable function via `rust_ffi::load_cdylib`.
 #
-# Diagnostic counterpart to stryke-arrow:
-#   * stryke-arrow ::: reads & writes parquet (and ipc/csv/json/feather)
-#                      as data-pipeline operations.
-#   * stryke-parquet  ::: inspects parquet files — schema, footer stats,
-#                         row-group breakdown, per-column stats, head/tail,
-#                         recompression. Like `pqrs` / `parquet-tools`.
-#
-# Public fns take a `$path` (and optional %opts via the hashref-internal
-# pattern). %opts keys are command-specific — see each fn doc.
+# Replaces the v1 helper-binary model (fork(2) + exec(2) + NDJSON over a
+# pipe). Stateless package — parquet operations are pure file inspection
+# and transforms; no process-level state.
 
 package Parquet
 
-our $HELPER
+# ── error dispatch ────────────────────────────────────────────────────
 
-fn Parquet::pkg_root {
-    my @parts = split "/", __FILE__
-    pop @parts
-    pop @parts
-    my $root = join "/", @parts
-    $root ne "" ? $root : "."
+fn Parquet::_decode ($name, $json) {
+    my $o = from_json $json
+    if (ref $o eq "HASH" && exists $o->{error}) {
+        die "Parquet::$name: $o->{error}"
+    }
+    $o
 }
 
-fn Parquet::helper_path {
-    return $Parquet::HELPER if defined $Parquet::HELPER && -x $Parquet::HELPER
-
-    if (exists $ENV{STRYKE_PARQUET_HELPER} && $ENV{STRYKE_PARQUET_HELPER} ne "") {
-        my $p = $ENV{STRYKE_PARQUET_HELPER}
-        die "stryke-parquet: STRYKE_PARQUET_HELPER=$p is not an executable file" unless -x $p
-        $Parquet::HELPER = $p
-        return $p
-    }
-
-    my $root = Parquet::pkg_root()
-    for my $cand (
-        "$root/target/release/stryke-parquet-helper",
-        "$root/target/debug/stryke-parquet-helper",
-        "$root/bin/stryke-parquet-helper",
-    ) {
-        if (-x $cand) {
-            $Parquet::HELPER = $cand
-            return $cand
-        }
-    }
-
-    my $which = qx{command -v stryke-parquet-helper 2>/dev/null}
-    chomp $which
-    if ($which ne "" && -x $which) {
-        $Parquet::HELPER = $which
-        return $which
-    }
-
-    die "stryke-parquet: helper binary not found.\n" .
-        "  Build it once with:  cd $root && cargo build --release\n" .
-        "  Or set STRYKE_PARQUET_HELPER=/path/to/stryke-parquet-helper\n"
-}
-
-fn Parquet::ensure_built {
-    my $root = Parquet::pkg_root()
-    for my $cand ("$root/target/release/stryke-parquet-helper",
-                  "$root/target/debug/stryke-parquet-helper") {
-        return $cand if -x $cand
-    }
-    return Parquet::helper_path() if exists $ENV{STRYKE_PARQUET_HELPER}
-
-    p "stryke-parquet: building helper (cargo build --release)..."
-    my $rc = system "cd " . Parquet::_shq($root) . " && cargo build --release"
-    die "stryke-parquet: cargo build failed (rc=$rc)" if $rc != 0
-    Parquet::helper_path()
-}
-
-fn Parquet::_shq ($s) {
-    my $t = $s
-    $t =~ s/'/'\\''/g
-    "'$t'"
-}
-
-fn Parquet::_drain_ndjson ($fh) {
-    my @rows
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        push @rows, from_json $line
-    }
-    @rows
-}
-
-fn Parquet::_run_ndjson ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_PARQUET_DEBUG}) {
-        warn "DEBUG parquet cmd: $cmd\n"
-    }
-    open my $fh, "-|", $cmd or die "stryke-parquet: spawn failed: $!"
-    my @rows = Parquet::_drain_ndjson $fh
-    close $fh or die "stryke-parquet: helper exited ($?)"
-    @rows
-}
-
-fn Parquet::_run_json ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_PARQUET_DEBUG}) {
-        warn "DEBUG parquet cmd: $cmd\n"
-    }
-    my $out = qx{$cmd}
-    die "stryke-parquet: helper exited ($?)" if $? != 0
-    from_json $out
-}
-
-fn Parquet::_run_raw ($argv) {
-    my $cmd = join " ", @$argv
-    if ($ENV{STRYKE_PARQUET_DEBUG}) {
-        warn "DEBUG parquet cmd: $cmd\n"
-    }
-    my $out = qx{$cmd}
-    die "stryke-parquet: helper exited ($?)" if $? != 0
-    $out
-}
+# ── version ──────────────────────────────────────────────────────────
 
 fn Parquet::version {
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my $v = qx{$bin --version 2>&1}
-    chomp $v
-    $v
+    my $o = Parquet::_decode("version", parquet__version("{}"))
+    $o->{version}
 }
 
-# ---------------------------------------------------------------------------
-# Diagnostic / metadata (footer-only, fast — no row data scan)
-# ---------------------------------------------------------------------------
+# ── diagnostic / metadata ────────────────────────────────────────────
 
-# { path, file_size, num_rows, num_row_groups, num_columns,
-#   total_compressed_size, total_uncompressed_size, compression_ratio,
-#   compressions: {codec => count}, created_by, version }
 fn Parquet::inspect ($path) {
     die "Parquet::inspect: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    Parquet::_run_json([$bin, "inspect", Parquet::_shq($path)])
+    Parquet::_decode("inspect", parquet__inspect(to_json({ path => $path })))
 }
 
-# { fields: [{ name, type, nullable }], num_fields }
 fn Parquet::schema ($path) {
     die "Parquet::schema: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    Parquet::_run_json([$bin, "schema", Parquet::_shq($path)])
+    Parquet::_decode("schema", parquet__schema(to_json({ path => $path })))
 }
 
-# Just the row count.
 fn Parquet::count ($path) {
     die "Parquet::count: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my $r = Parquet::_run_json([$bin, "count", Parquet::_shq($path)])
-    $r->{num_rows}
+    Parquet::_decode("count", parquet__count(to_json({ path => $path })))->{num_rows}
 }
 
-# Array of row-group hashrefs:
-#   { ordinal, num_rows, total_byte_size, total_compressed_size, columns: [...] }
 fn Parquet::rowgroups ($path) {
     die "Parquet::rowgroups: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    Parquet::_run_ndjson([$bin, "rowgroups", Parquet::_shq($path)])
+    my $o = Parquet::_decode("rowgroups", parquet__rowgroups(to_json({ path => $path })))
+    @{ $o->{row_groups} }
 }
 
-# Per-column stats (aggregated across row groups). Pass `column => "name"`
-# to filter to one column.
-#   { name, type, nullable, null_count, distinct_count, min, max }
 fn Parquet::stats ($path, %opts) {
     die "Parquet::stats: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my @argv = ($bin, "stats", Parquet::_shq($path))
-    push @argv, "--column", Parquet::_shq($opts{column}) if defined $opts{column}
-    Parquet::_run_ndjson(\@argv)
+    my $o = Parquet::_decode("stats", parquet__stats(to_json({ path => $path })))
+    if (defined $opts{column}) {
+        return grep { $_->{name} eq $opts{column} } @{ $o->{columns} }
+    }
+    @{ $o->{columns} }
 }
 
-# ---------------------------------------------------------------------------
-# Row data
-# ---------------------------------------------------------------------------
+# ── row data ─────────────────────────────────────────────────────────
 
-# First N rows as hashrefs. `columns` optional (arrayref or comma-string).
 fn Parquet::head ($path, %opts) {
     die "Parquet::head: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my @argv = ($bin, "head", Parquet::_shq($path))
-    push @argv, "--n", Parquet::_shq($opts{n}) if defined $opts{n}
-    if (defined $opts{columns}) {
-        my $cols = ref($opts{columns}) eq "ARRAY"
-            ? join(",", @{ $opts{columns} })
-            : $opts{columns}
-        push @argv, "--columns", Parquet::_shq($cols)
-    }
-    Parquet::_run_ndjson(\@argv)
+    my $n = $opts{n} // 10
+    my $o = Parquet::_decode("head", parquet__head(to_json({ path => $path, n => $n })))
+    @{ $o->{rows} }
 }
 
-# Last N rows.
 fn Parquet::tail ($path, %opts) {
     die "Parquet::tail: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my @argv = ($bin, "tail", Parquet::_shq($path))
-    push @argv, "--n", Parquet::_shq($opts{n}) if defined $opts{n}
-    if (defined $opts{columns}) {
-        my $cols = ref($opts{columns}) eq "ARRAY"
-            ? join(",", @{ $opts{columns} })
-            : $opts{columns}
-        push @argv, "--columns", Parquet::_shq($cols)
-    }
-    Parquet::_run_ndjson(\@argv)
+    my $n = $opts{n} // 10
+    my $o = Parquet::_decode("tail", parquet__tail(to_json({ path => $path, n => $n })))
+    @{ $o->{rows} }
 }
 
-# All rows.
 fn Parquet::to_json ($path, %opts) {
     die "Parquet::to_json: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my @argv = ($bin, "to-json", Parquet::_shq($path))
-    if (defined $opts{columns}) {
-        my $cols = ref($opts{columns}) eq "ARRAY"
-            ? join(",", @{ $opts{columns} })
-            : $opts{columns}
-        push @argv, "--columns", Parquet::_shq($cols)
-    }
-    Parquet::_run_ndjson(\@argv)
+    my $o = Parquet::_decode("to_json", parquet__to_json(to_json({ path => $path, limit => $opts{limit} })))
+    @{ $o->{rows} }
 }
 
-# Streaming variant for huge files — callback fires once per row.
+# Callback fires per row. The cdylib returns all rows in one call; the
+# v1 helper streamed NDJSON over a pipe. In-process FFI has no pipe-flush
+# latency, so buffered iteration is equivalent in throughput.
 fn Parquet::stream ($path, %opts) {
     die "Parquet::stream: callback => sub { … } required" unless defined $opts{callback}
     my $cb = $opts{callback}
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my @argv = ($bin, "to-json", Parquet::_shq($path))
-    if (defined $opts{columns}) {
-        my $cols = ref($opts{columns}) eq "ARRAY"
-            ? join(",", @{ $opts{columns} })
-            : $opts{columns}
-        push @argv, "--columns", Parquet::_shq($cols)
-    }
-    my $cmd = join " ", @argv
+    my @rows = Parquet::to_json($path, %opts)
     my $n = 0
-    open my $fh, "-|", $cmd or die "Parquet::stream: spawn failed: $!"
-    while (my $line = <$fh>) {
-        chomp $line
-        next if $line eq ""
-        $cb->(from_json $line)
+    for my $row (@rows) {
+        $cb->($row)
         $n++
     }
-    close $fh or die "Parquet::stream: helper exited ($?)"
     $n
 }
 
-# Write CSV to a file or capture as a scalar. `output => "PATH"` writes;
-# omit for an in-memory scalar.
+# Write CSV to a file. The v1 to-stdout variant is gone — the cdylib only
+# writes to disk (use Parquet::to_json + your own CSV encoding for in-memory).
 fn Parquet::to_csv ($path, %opts) {
     die "Parquet::to_csv: file `$path` not found" unless -e $path
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my @argv = ($bin, "to-csv", Parquet::_shq($path))
-    if (defined $opts{columns}) {
-        my $cols = ref($opts{columns}) eq "ARRAY"
-            ? join(",", @{ $opts{columns} })
-            : $opts{columns}
-        push @argv, "--columns", Parquet::_shq($cols)
-    }
-    if (defined $opts{output}) {
-        push @argv, "--output", Parquet::_shq($opts{output})
-        my $rc = system join(" ", @argv)
-        die "Parquet::to_csv: helper exited ($rc)" if $rc != 0
-        return $opts{output}
-    }
-    push @argv, "--output", "-"
-    Parquet::_run_raw(\@argv)
+    die "Parquet::to_csv: output => PATH required" unless defined $opts{output}
+    my $r = Parquet::_decode("to_csv",
+        parquet__to_csv(to_json({ path => $path, dst => $opts{output}, header => ($opts{header} // 1) })))
+    $r->{path}
 }
 
 # Recompress: read SRC, write DST with the new codec / row-group size.
-# %opts: codec (default "zstd"), row_group (rows).
 fn Parquet::compress ($src, $dst, %opts) {
     die "Parquet::compress: src `$src` not found" unless -e $src
-    my $bin = Parquet::_shq(Parquet::helper_path())
-    my @argv = ($bin, "compress", Parquet::_shq($src), Parquet::_shq($dst))
-    push @argv, "--codec", Parquet::_shq($opts{codec}) if defined $opts{codec}
-    push @argv, "--row-group", Parquet::_shq($opts{row_group}) if defined $opts{row_group}
-    Parquet::_run_json(\@argv)
+    Parquet::_decode("compress",
+        parquet__compress(to_json({
+            src => $src, dst => $dst,
+            compression => ($opts{codec} // $opts{compression}),
+            row_group => $opts{row_group},
+        })))
+}
+
+# Internal: write a small demo parquet at PATH. Used by tests.
+fn Parquet::_mkdemo ($path) {
+    Parquet::_decode("mkdemo", parquet__mkdemo(to_json({ path => $path })))
 }
 
 1

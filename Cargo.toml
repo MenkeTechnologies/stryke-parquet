@@ -1,17 +1,18 @@
 [package]
-name = "stryke-parquet-helper"
-version = "0.1.1"
+name = "stryke-parquet"
+version = "0.2.0"
 edition = "2021"
-description = "Parquet diagnostic helper binary for the stryke `parquet` package"
+description = "Parquet diagnostic + transform cdylib for the stryke `parquet` package — dlopened in-process via stryke's FFI bridge."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-parquet"
 homepage = "https://menketechnologies.github.io/stryke-parquet/"
 publish = false
 
-[[bin]]
-name = "stryke-parquet-helper"
-path = "src/main.rs"
+[lib]
+name = "stryke_parquet"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
 
 [dependencies]
 parquet = { version = "58", default-features = false, features = [
@@ -27,12 +28,10 @@ parquet = { version = "58", default-features = false, features = [
 arrow = "58"
 arrow-json = "58"
 arrow-csv = "58"
-clap = { version = "4", default-features = false, features = [
-    "std", "derive", "help", "usage", "error-context",
-] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
+once_cell = "1"
 
 [profile.release]
 opt-level = 3

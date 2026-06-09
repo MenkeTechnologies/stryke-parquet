@@ -1,15 +1,29 @@
 [package]
 name = "parquet"
-version = "0.1.0"
-description = "Parquet file inspector for stryke — schema, footer stats, row-group breakdown, head/tail, format conversion. Diagnostic counterpart to stryke-arrow."
+version = "0.2.0"
+description = "Parquet file inspector / transform cdylib for stryke. Schema, footer stats, row-group breakdown, head/tail, JSON/CSV conversion, recompression. Dlopened in-process via stryke's FFI bridge."
 authors = ["MenkeTechnologies"]
 license = "MIT"
 repository = "https://github.com/MenkeTechnologies/stryke-parquet"
 edition = "2026"
 
-[bin]
-parquet = "bin/parquet.stk"
-parquet-build = "bin/parquet-build.stk"
+[ffi]
+lib-name = "stryke_parquet"
+namespace = "Parquet"
+exports = [
+    "parquet__version",
+    "parquet__inspect",
+    "parquet__schema",
+    "parquet__count",
+    "parquet__rowgroups",
+    "parquet__stats",
+    "parquet__head",
+    "parquet__tail",
+    "parquet__to_json",
+    "parquet__to_csv",
+    "parquet__compress",
+    "parquet__mkdemo",
+]
 
 [scripts]
 build = "cargo build --release"

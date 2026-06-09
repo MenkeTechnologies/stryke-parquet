@@ -1,13 +1,13 @@
-# t/test_parquet.stk — self-contained round-trip tests.
+# t/test_parquet.stk — self-contained round-trip tests against the cdylib.
 #
-# Uses the helper's `mkdemo` subcommand to generate a known-shape parquet
-# in /tmp, then exercises every diagnostic command against it.
+# Uses the `_mkdemo` export to generate a known-shape parquet in /tmp,
+# then exercises every diagnostic op against it.
 
-require "./lib/Parquet.stk"
+use Parquet
 
-my $have_helper = eval { Parquet::helper_path(); 1 }
-unless ($have_helper) {
-    p "1..0 # SKIP helper not built — run `cargo build --release` first"
+my $have_cdylib = eval { Parquet::version(); 1 }
+unless ($have_cdylib) {
+    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
     exit 0
 }
 
@@ -16,9 +16,7 @@ mkdir $tmp unless -d $tmp
 my $path = "$tmp/demo.parquet"
 my $path2 = "$tmp/demo-snap.parquet"
 
-my $bin = Parquet::helper_path()
-my $rc = system "$bin mkdemo " . Parquet::_shq($path) . " > /dev/null"
-die "mkdemo failed: $rc" if $rc != 0
+Parquet::_mkdemo($path)
 
 p "1..10"
 my $i = 0
