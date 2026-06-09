@@ -40,15 +40,15 @@ fn open_parquet_reader(
     path: &Path,
     batch_size: usize,
 ) -> Result<parquet::arrow::arrow_reader::ParquetRecordBatchReader> {
-    let file = File::open(path)
-        .with_context(|| format!("opening parquet file `{}`", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("opening parquet file `{}`", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(batch_size);
     Ok(builder.build()?)
 }
 
 fn open_serialized(path: &Path) -> Result<SerializedFileReader<File>> {
-    let file = File::open(path)
-        .with_context(|| format!("opening parquet file `{}`", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("opening parquet file `{}`", path.display()))?;
     Ok(SerializedFileReader::new(file)?)
 }
 
@@ -93,7 +93,9 @@ fn stat_minmax(stats: &Statistics) -> (Value, Value) {
 // ── ops: read-side ──────────────────────────────────────────────────────────
 
 fn op_inspect(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let r = open_serialized(Path::new(path))?;
     let m = r.metadata();
     let f = m.file_metadata();
@@ -113,7 +115,10 @@ fn op_inspect(args: Value) -> Result<Value> {
                 .or_insert(0) += 1;
         }
     }
-    let dominant_compression = compressions.iter().max_by_key(|e| e.1).map(|(k, _)| k.clone());
+    let dominant_compression = compressions
+        .iter()
+        .max_by_key(|e| e.1)
+        .map(|(k, _)| k.clone());
     Ok(json!({
         "path": path,
         "num_rows": num_rows,
@@ -126,7 +131,9 @@ fn op_inspect(args: Value) -> Result<Value> {
 }
 
 fn op_schema(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let r = open_serialized(Path::new(path))?;
     let descr = r.metadata().file_metadata().schema_descr();
     let fields: Vec<Value> = (0..descr.num_columns())
@@ -148,13 +155,17 @@ fn op_schema(args: Value) -> Result<Value> {
 }
 
 fn op_count(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let r = open_serialized(Path::new(path))?;
     Ok(json!({"num_rows": r.metadata().file_metadata().num_rows()}))
 }
 
 fn op_rowgroups(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let r = open_serialized(Path::new(path))?;
     let m = r.metadata();
     let groups: Vec<Value> = (0..m.num_row_groups())
@@ -172,7 +183,9 @@ fn op_rowgroups(args: Value) -> Result<Value> {
 }
 
 fn op_stats(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let r = open_serialized(Path::new(path))?;
     let m = r.metadata();
     let descr = m.file_metadata().schema_descr();
@@ -216,7 +229,9 @@ fn cmp_max(a: &Value, b: &Value) -> bool {
 // ── ops: row read / convert ─────────────────────────────────────────────────
 
 fn op_head(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let n = args["n"].as_u64().unwrap_or(10) as usize;
     let reader = open_parquet_reader(Path::new(path), 8192)?;
     let mut buf = Vec::<u8>::new();
@@ -243,7 +258,9 @@ fn op_head(args: Value) -> Result<Value> {
 }
 
 fn op_tail(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let n = args["n"].as_u64().unwrap_or(10) as usize;
     // Read only the last row group for efficiency.
     let file = File::open(path)?;
@@ -294,7 +311,9 @@ fn op_tail(args: Value) -> Result<Value> {
 }
 
 fn op_to_json(args: Value) -> Result<Value> {
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let limit = args["limit"].as_u64().map(|n| n as usize);
     let reader = open_parquet_reader(Path::new(path), 8192)?;
     let mut buf = Vec::<u8>::new();
@@ -326,10 +345,10 @@ fn op_to_json(args: Value) -> Result<Value> {
 }
 
 fn op_to_csv(args: Value) -> Result<Value> {
-    let src = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
-    let dst = args["dst"]
+    let src = args["path"]
         .as_str()
-        .ok_or_else(|| anyhow!("missing dst"))?;
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
     let with_header = args["header"].as_bool().unwrap_or(true);
     let reader = open_parquet_reader(Path::new(src), 8192)?;
     let file = File::create(dst)?;
@@ -371,7 +390,9 @@ fn op_compress(args: Value) -> Result<Value> {
 fn op_mkdemo(args: Value) -> Result<Value> {
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    let path = args["path"].as_str().ok_or_else(|| anyhow!("missing path"))?;
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("name", DataType::Utf8, false),
@@ -445,9 +466,7 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
 
 #[no_mangle]
 pub extern "C" fn parquet__version(args: *const c_char) -> *const c_char {
-    ffi_call(args, |_| {
-        Ok(json!({"version": env!("CARGO_PKG_VERSION")}))
-    })
+    ffi_call(args, |_| Ok(json!({"version": env!("CARGO_PKG_VERSION")})))
 }
 
 #[no_mangle]
