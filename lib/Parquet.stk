@@ -13,6 +13,7 @@ package Parquet
 
 # ── error dispatch ────────────────────────────────────────────────────
 
+## Decode the cdylib's JSON return; die on `{error}` payload.
 fn Parquet::_decode ($name, $json) {
     my $o = from_json $json
     if (ref $o eq "HASH" && exists $o->{error}) {
@@ -23,6 +24,7 @@ fn Parquet::_decode ($name, $json) {
 
 # ── version ──────────────────────────────────────────────────────────
 
+## Return the package version string.
 fn Parquet::version {
     my $o = Parquet::_decode("version", parquet__version("{}"))
     $o->{version}
@@ -30,27 +32,32 @@ fn Parquet::version {
 
 # ── diagnostic / metadata ────────────────────────────────────────────
 
+## Parquet footer summary: row count, row groups, compression.
 fn Parquet::inspect ($path) {
     die "Parquet::inspect: file `$path` not found" unless -e $path
     Parquet::_decode("inspect", parquet__inspect(to_json({ path => $path })))
 }
 
+## Parquet schema { fields: [{name, path, physical_type, ...}] }.
 fn Parquet::schema ($path) {
     die "Parquet::schema: file `$path` not found" unless -e $path
     Parquet::_decode("schema", parquet__schema(to_json({ path => $path })))
 }
 
+## Parquet row count from the footer (no data scan).
 fn Parquet::count ($path) {
     die "Parquet::count: file `$path` not found" unless -e $path
     Parquet::_decode("count", parquet__count(to_json({ path => $path })))->{num_rows}
 }
 
+## Per-row-group breakdown: rows, byte size, column count.
 fn Parquet::rowgroups ($path) {
     die "Parquet::rowgroups: file `$path` not found" unless -e $path
     my $o = Parquet::_decode("rowgroups", parquet__rowgroups(to_json({ path => $path })))
     @{ $o->{row_groups} }
 }
 
+## Per-column footer stats (null count, min, max). Opt `column => name`.
 fn Parquet::stats ($path, %opts) {
     die "Parquet::stats: file `$path` not found" unless -e $path
     my $o = Parquet::_decode("stats", parquet__stats(to_json({ path => $path })))
@@ -62,6 +69,7 @@ fn Parquet::stats ($path, %opts) {
 
 # ── row data ─────────────────────────────────────────────────────────
 
+## First N rows as hashrefs.
 fn Parquet::head ($path, %opts) {
     die "Parquet::head: file `$path` not found" unless -e $path
     my $n = $opts{n} // 10
@@ -69,6 +77,7 @@ fn Parquet::head ($path, %opts) {
     @{ $o->{rows} }
 }
 
+## Last N rows as hashrefs (reads only the trailing row group).
 fn Parquet::tail ($path, %opts) {
     die "Parquet::tail: file `$path` not found" unless -e $path
     my $n = $opts{n} // 10
@@ -76,6 +85,7 @@ fn Parquet::tail ($path, %opts) {
     @{ $o->{rows} }
 }
 
+## All rows as hashrefs. Opt `limit`.
 fn Parquet::to_json ($path, %opts) {
     die "Parquet::to_json: file `$path` not found" unless -e $path
     my $o = Parquet::_decode("to_json", parquet__to_json(to_json({ path => $path, limit => $opts{limit} })))
