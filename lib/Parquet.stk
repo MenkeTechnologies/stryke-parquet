@@ -133,4 +133,3 @@ fn Parquet::_mkdemo ($path) {
     Parquet::_decode("mkdemo", parquet__mkdemo(to_json({ path => $path })))
 }
 
-1
