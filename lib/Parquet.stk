@@ -1,13 +1,13 @@
-# lib/Parquet.stk — Parquet file inspector + transforms for stryke.
-#
-# Thin wrapper around the `stryke-parquet` cdylib's `parquet__*` exports.
-# The cdylib is dlopened in-process on first `use Parquet` (see stryke's
-# `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
-# stryke-callable function via `rust_ffi::load_cdylib`.
-#
-# Replaces the v1 helper-binary model (fork(2) + exec(2) + NDJSON over a
-# pipe). Stateless package — parquet operations are pure file inspection
-# and transforms; no process-level state.
+## lib/Parquet.stk — Parquet file inspector + transforms for stryke.
+##
+## Thin wrapper around the `stryke-parquet` cdylib's `parquet__*` exports.
+## The cdylib is dlopened in-process on first `use Parquet` (see stryke's
+## `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+## stryke-callable function via `rust_ffi::load_cdylib`.
+##
+## Replaces the v1 helper-binary model (fork(2) + exec(2) + NDJSON over a
+## pipe). Stateless package — parquet operations are pure file inspection
+## and transforms; no process-level state.
 
 package Parquet
 
@@ -82,9 +82,9 @@ fn Parquet::to_json ($path, %opts) {
     @{ $o->{rows} }
 }
 
-# Callback fires per row. The cdylib returns all rows in one call; the
-# v1 helper streamed NDJSON over a pipe. In-process FFI has no pipe-flush
-# latency, so buffered iteration is equivalent in throughput.
+## Callback fires per row. The cdylib returns all rows in one call; the
+## v1 helper streamed NDJSON over a pipe. In-process FFI has no pipe-flush
+## latency, so buffered iteration is equivalent in throughput.
 fn Parquet::stream ($path, %opts) {
     die "Parquet::stream: callback => sub { … } required" unless defined $opts{callback}
     my $cb = $opts{callback}
@@ -97,8 +97,8 @@ fn Parquet::stream ($path, %opts) {
     $n
 }
 
-# Write CSV to a file. The v1 to-stdout variant is gone — the cdylib only
-# writes to disk (use Parquet::to_json + your own CSV encoding for in-memory).
+## Write CSV to a file. The v1 to-stdout variant is gone — the cdylib only
+## writes to disk (use Parquet::to_json + your own CSV encoding for in-memory).
 fn Parquet::to_csv ($path, %opts) {
     die "Parquet::to_csv: file `$path` not found" unless -e $path
     die "Parquet::to_csv: output => PATH required" unless defined $opts{output}
@@ -107,7 +107,7 @@ fn Parquet::to_csv ($path, %opts) {
     $r->{path}
 }
 
-# Recompress: read SRC, write DST with the new codec / row-group size.
+## Recompress: read SRC, write DST with the new codec / row-group size.
 fn Parquet::compress ($src, $dst, %opts) {
     die "Parquet::compress: src `$src` not found" unless -e $src
     Parquet::_decode("compress",
@@ -118,7 +118,7 @@ fn Parquet::compress ($src, $dst, %opts) {
         })))
 }
 
-# Internal: write a small demo parquet at PATH. Used by tests.
+## Internal: write a small demo parquet at PATH. Used by tests.
 fn Parquet::_mkdemo ($path) {
     Parquet::_decode("mkdemo", parquet__mkdemo(to_json({ path => $path })))
 }
