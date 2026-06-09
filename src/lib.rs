@@ -523,3 +523,118 @@ pub extern "C" fn parquet__compress(args: *const c_char) -> *const c_char {
 pub extern "C" fn parquet__mkdemo(args: *const c_char) -> *const c_char {
     ffi_call(args, op_mkdemo)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── compression_for ──
+
+    #[test]
+    fn compression_canonical_names() {
+        assert!(matches!(
+            compression_for("none").unwrap(),
+            Compression::UNCOMPRESSED
+        ));
+        assert!(matches!(
+            compression_for("snappy").unwrap(),
+            Compression::SNAPPY
+        ));
+        assert!(matches!(
+            compression_for("lz4").unwrap(),
+            Compression::LZ4_RAW
+        ));
+    }
+
+    #[test]
+    fn compression_case_insensitive() {
+        assert!(matches!(
+            compression_for("SNAPPY").unwrap(),
+            Compression::SNAPPY
+        ));
+        assert!(matches!(
+            compression_for("Gzip").unwrap(),
+            Compression::GZIP(_)
+        ));
+    }
+
+    #[test]
+    fn compression_aliases() {
+        assert!(matches!(
+            compression_for("uncompressed").unwrap(),
+            Compression::UNCOMPRESSED
+        ));
+    }
+
+    #[test]
+    fn compression_unknown_errors_with_name() {
+        let err = compression_for("lzma").unwrap_err().to_string();
+        assert!(err.contains("lzma"), "{err}");
+    }
+
+    // ── cmp_max ──
+
+    #[test]
+    fn cmp_max_true_when_b_greater() {
+        assert!(cmp_max(&json!(1.0), &json!(2.0)));
+        assert!(cmp_max(&json!(1), &json!(2)));
+    }
+
+    #[test]
+    fn cmp_max_false_when_b_lesser_or_equal() {
+        assert!(!cmp_max(&json!(2.0), &json!(1.0)));
+        assert!(!cmp_max(&json!(2.0), &json!(2.0)));
+    }
+
+    #[test]
+    fn cmp_max_non_numeric_is_false() {
+        // Stats reduction folds over batches; non-numeric (string, null,
+        // array) values must not promote a "new max" — keep the existing.
+        assert!(!cmp_max(&json!("a"), &json!("b")));
+        assert!(!cmp_max(&Value::Null, &json!(5)));
+        assert!(!cmp_max(&json!(5), &Value::Null));
+    }
+
+    // ── ndjson_to_rows ──
+
+    #[test]
+    fn ndjson_parses_single_line() {
+        let buf = b"{\"a\":1}\n";
+        let rows = ndjson_to_rows(buf).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["a"], json!(1));
+    }
+
+    #[test]
+    fn ndjson_parses_multi_line() {
+        let buf = b"{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n";
+        let rows = ndjson_to_rows(buf).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2]["a"], json!(3));
+    }
+
+    #[test]
+    fn ndjson_skips_blank_lines() {
+        let buf = b"{\"a\":1}\n\n{\"a\":2}\n\n";
+        let rows = ndjson_to_rows(buf).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn ndjson_empty_buf_yields_empty_rows() {
+        assert!(ndjson_to_rows(b"").unwrap().is_empty());
+        assert!(ndjson_to_rows(b"\n\n\n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn ndjson_invalid_json_errors() {
+        let buf = b"{\"a\":1}\nnot-json\n";
+        assert!(ndjson_to_rows(buf).is_err());
+    }
+
+    #[test]
+    fn ndjson_invalid_utf8_errors() {
+        let buf = &[0xFF_u8, 0xFE, b'\n'];
+        assert!(ndjson_to_rows(buf).is_err());
+    }
+}

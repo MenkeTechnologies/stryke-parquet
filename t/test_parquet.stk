@@ -1,112 +1,72 @@
-# t/test_parquet.stk — self-contained round-trip tests against the cdylib.
-#
-# Uses the `_mkdemo` export to generate a known-shape parquet in /tmp,
-# then exercises every diagnostic op against it.
+## t/test_parquet.stk — assertion tests for the stryke `Parquet` package.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`).
+## Self-contained — generates a fixed-shape demo parquet via the cdylib's
+## `_mkdemo` export, then exercises every diagnostic op against it.
+## Requires the cdylib to be loaded (install once with `s pkg install -g .`).
 
 use Parquet
 
-val $have_cdylib = eval { Parquet::version(); 1 }
-unless ($have_cdylib) {
-    p "1..0 # SKIP cdylib not loaded — run `s pkg install -g .` first"
-    exit 0
-}
+# ── permission-free: cdylib reachable ───────────────────────────────
+val $version = Parquet::version()
+assert_ok $version, "Parquet::version returns truthy (cdylib loaded)"
 
+# ── generate demo file ──────────────────────────────────────────────
 val $tmp = "/tmp/stryke-parquet-test-$$"
 mkdir $tmp unless -d $tmp
-val $path = "$tmp/demo.parquet"
+val $path  = "$tmp/demo.parquet"
 val $path2 = "$tmp/demo-snap.parquet"
-
 Parquet::_mkdemo($path)
 
-p "1..10"
-var $i = 0
+# ── count ───────────────────────────────────────────────────────────
+assert_eq Parquet::count($path), 5, "count: 5 rows"
 
-# 1. count
-var $n
-eval { $n = Parquet::count($path) }
-$i++
-p $@ ? "not ok $i - count: $@" : ($n == 5 ? "ok $i - count" : "not ok $i - count=$n")
+# ── inspect ─────────────────────────────────────────────────────────
+val $info = Parquet::inspect($path)
+assert_eq $info->{num_rows}, 5, "inspect: num_rows=5"
+assert_eq $info->{num_columns}, 3, "inspect: num_columns=3"
 
-# 2. inspect
-var $info
-eval { $info = Parquet::inspect($path) }
-$i++
-p $@ ? "not ok $i - inspect: $@" :
-       ($info->{num_rows} == 5 && $info->{num_columns} == 3
-            ? "ok $i - inspect"
-            : "not ok $i - inspect bad shape")
+# ── schema ──────────────────────────────────────────────────────────
+assert_eq Parquet::schema($path)->{num_fields}, 3, "schema: 3 fields"
 
-# 3. schema
-var $sch
-eval { $sch = Parquet::schema($path) }
-$i++
-p $@ ? "not ok $i - schema: $@" :
-       ($sch->{num_fields} == 3 ? "ok $i - schema (3 fields)" :
-        "not ok $i - schema fields=$sch->{num_fields}")
+# ── head 2 ──────────────────────────────────────────────────────────
+val @first = Parquet::head($path, n => 2)
+assert_eq scalar(@first), 2, "head(2): 2 rows"
+assert_eq $first[0]->{name}, "alice", "head(2): first.name=alice"
 
-# 4. head 2
-var @first
-eval { @first = Parquet::head($path, n => 2) }
-$i++
-p $@ ? "not ok $i - head: $@" :
-       (len(@first) == 2 && $first[0]->{name} eq "alice"
-            ? "ok $i - head"
-            : "not ok $i - head wrong")
+# ── tail 2 ──────────────────────────────────────────────────────────
+val @last = Parquet::tail($path, n => 2)
+assert_eq scalar(@last), 2, "tail(2): 2 rows"
+assert_eq $last[-1]->{name}, "eve", "tail(2): last.name=eve"
 
-# 5. tail 2
-var @last
-eval { @last = Parquet::tail($path, n => 2) }
-$i++
-p $@ ? "not ok $i - tail: $@" :
-       (len(@last) == 2 && $last[-1]->{name} eq "eve"
-            ? "ok $i - tail"
-            : "not ok $i - tail wrong: " . to_json(\@last))
+# ── rowgroups ───────────────────────────────────────────────────────
+val @rgs = Parquet::rowgroups($path)
+assert_ge scalar(@rgs), 1, "rowgroups: ≥1 group"
+assert_eq $rgs[0]->{num_rows}, 5, "rowgroups[0]: 5 rows"
 
-# 6. rowgroups
-var @rgs
-eval { @rgs = Parquet::rowgroups($path) }
-$i++
-p $@ ? "not ok $i - rowgroups: $@" :
-       (len(@rgs) >= 1 && $rgs[0]->{num_rows} == 5
-            ? "ok $i - rowgroups"
-            : "not ok $i - rowgroups bad shape")
+# ── stats all columns ───────────────────────────────────────────────
+val @stats = Parquet::stats($path)
+assert_eq scalar(@stats), 3, "stats: one row per column"
 
-# 7. stats all columns (3 lines)
-var @stats
-eval { @stats = Parquet::stats($path) }
-$i++
-p $@ ? "not ok $i - stats: $@" :
-       (len(@stats) == 3 ? "ok $i - stats" :
-        "not ok $i - stats got " . len(@stats))
+# ── stats single column with null count ─────────────────────────────
+val @score_stats = Parquet::stats($path, column => "score")
+assert_eq scalar(@score_stats), 1, "stats(score): 1 row"
+assert_eq $score_stats[0]->{null_count}, 1, "stats(score): null_count=1"
 
-# 8. stats single column with null count
-var @scol
-eval { @scol = Parquet::stats($path, column => "score") }
-$i++
-p $@ ? "not ok $i - stats(score): $@" :
-       (len(@scol) == 1 && $scol[0]->{null_count} == 1
-            ? "ok $i - stats(score) null_count=1"
-            : "not ok $i - stats(score) wrong: " . to_json(\@scol))
+# ── column projection in head ───────────────────────────────────────
+val @proj = Parquet::head($path, n => 1, columns => ["id", "name"])
+assert_ok defined $proj[0]->{id}, "head projection: id present"
+assert_ok defined $proj[0]->{name}, "head projection: name present"
+assert_ok !exists $proj[0]->{score}, "head projection: score excluded"
 
-# 9. column projection in head
-var @proj
-eval { @proj = Parquet::head($path, n => 1, columns => ["id", "name"]) }
-$i++
-p $@ ? "not ok $i - head projection: $@" :
-       (defined $proj[0]->{id} && defined $proj[0]->{name} && !exists $proj[0]->{score}
-            ? "ok $i - head projection"
-            : "not ok $i - head projection got: " . to_json($proj[0]))
-
-# 10. compress to snappy
-var $cr
-eval { $cr = Parquet::compress($path, $path2, codec => "snappy") }
-$i++
-p $@ ? "not ok $i - compress: $@" :
-       ($cr->{num_rows} == 5 && -e $path2
-            ? "ok $i - compress (#{$cr->{dst_size}} bytes)"
-            : "not ok $i - compress wrong")
+# ── compress to snappy ──────────────────────────────────────────────
+val $cr = Parquet::compress($path, $path2, codec => "snappy")
+assert_eq $cr->{num_rows}, 5, "compress: num_rows=5"
+assert_ok -e $path2, "compress: output file exists"
 
 # cleanup
 unlink $path  if -e $path
 unlink $path2 if -e $path2
 rmdir $tmp   if -d $tmp
+
+test_run
