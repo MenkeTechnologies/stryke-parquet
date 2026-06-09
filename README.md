@@ -117,7 +117,7 @@ Parquet::compress "events.parquet", "events.zst.parquet",
 Each `Parquet::*` wrapper builds a JSON args dict and calls a sibling
 `parquet__*` symbol resolved out of `libstryke_parquet.{dylib,so}`. The
 cdylib is dlopened in-process on first `use Parquet` (via stryke's
-`pkg::commands::try_load_ffi_for` resolver hook) and exposes 11 entry
+`pkg::commands::try_load_ffi_for` resolver hook) and exposes 12 entry
 points: `version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
 `head`, `tail`, `to_json`, `to_csv`, `compress`, `mkdemo`.
 
