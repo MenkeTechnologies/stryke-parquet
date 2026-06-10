@@ -1,0 +1,53 @@
+#!/usr/bin/env stryke
+# examples/discover.stk — minimum-viable tour of the `Parquet` package.
+#
+# The Parquet package is read-only — synthesis is done by `Arrow::write`
+# from the sibling stryke-arrow package, then introspected here with
+# Parquet's inspect / schema / count / rowgroups / head. Demonstrates
+# Arrow + Parquet composing in-process and runs end-to-end in CI in <1s.
+#
+# Run:   s examples/discover.stk
+
+use Parquet
+use Arrow
+
+p "=== Parquet discover ==="
+p "version: " . Parquet::version()
+p ""
+
+# Synthesize a 100-row parquet via Arrow so the example is self-contained.
+var @rows
+for (var $i = 0; $i < 100; $i++) {
+    push @rows, {
+        id     => $i,
+        name   => "row-$i",
+        score  => $i * 1.5,
+        active => ($i % 7 == 0 ? undef : ($i % 2 == 0 ? 1 : 0)),
+    }
+}
+
+val $tmp = "/tmp/stryke-parquet-discover-$$.parquet"
+Arrow::write($tmp, \@rows)
+
+val $info = Parquet::inspect($tmp)
+val $sch  = Parquet::schema($tmp)
+val $n    = Parquet::count($tmp)
+val @rgs  = Parquet::rowgroups($tmp)
+
+p "wrote:        $tmp"
+p "rows:         $n"
+p "schema:       " . scalar(@{ $sch->{fields} }) . " field(s)"
+for val $f (@{ $sch->{fields} }) {
+    p "  - $f->{name}: $f->{type}"
+}
+p "row groups:   " . scalar(@rgs)
+p "file size:    " . ($info->{size} // "?") . " bytes"
+
+var @head = Parquet::head($tmp, n => 3)
+p "head(3):"
+for val $r (@head) {
+    p "  " . to_json($r)
+}
+
+unlink $tmp
+p "cleaned:      $tmp"
