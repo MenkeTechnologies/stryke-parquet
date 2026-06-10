@@ -757,7 +757,6 @@ mod tests {
         assert!(ndjson_to_rows(buf).is_err());
     }
 
-<<<<<<< Updated upstream
     /// `parse_columns` accepts a JSON array of strings, filters non-strings
     /// from the array (a single bad element doesn't poison the whole list),
     /// and returns None for non-array inputs (so a caller passing a bare
@@ -783,10 +782,15 @@ mod tests {
         assert_eq!(parse_columns(&json!({"cols": ["id"]})), None);
     }
 
+    /// `parse_columns(&json!([]))` now returns None (no projection) instead
+    /// of Some(vec![]) — matches pandas/polars `read_parquet(columns=[])`
+    /// semantics and prevents the downstream ProjectionMask from dropping
+    /// every schema field.
     #[test]
-    fn parse_columns_empty_array_is_some_empty_not_none() {
-        assert_eq!(parse_columns(&json!([])), Some(vec![]));
-=======
+    fn parse_columns_empty_array_is_none_for_no_projection() {
+        assert_eq!(parse_columns(&json!([])), None);
+    }
+
     // ── multi-row-group bug tests ──
     //
     // The next two tests construct a parquet file with multiple row groups
@@ -1018,6 +1022,5 @@ mod tests_audit {
             !min.is_null() && !max.is_null(),
             "Utf8 column stats must produce non-null min/max; got min={min} max={max}"
         );
->>>>>>> Stashed changes
     }
 }
