@@ -1,0 +1,62 @@
+#!/usr/bin/env stryke
+# examples/stats.stk — per-column statistics from a parquet's metadata.
+#
+# Cheap: reads only the parquet footer (no data scan). Synthesizes
+# a small parquet via Arrow if no $ARGV[0] given so the example runs
+# end-to-end with no input.
+#
+# Run:   s examples/stats.stk
+#        s examples/stats.stk /path/to/file.parquet
+
+use Parquet
+use Arrow
+
+p "=== Parquet stats tour ==="
+
+var $path
+var $cleanup = 0
+
+if (defined $ARGV[0] && -f $ARGV[0]) {
+    $path = $ARGV[0]
+    p "input:  $path (user-supplied)"
+} else {
+    $path = "/tmp/stryke-parquet-stats-$$.parquet"
+    $cleanup = 1
+    var @rows
+    for (var $i = 0; $i < 1000; $i++) {
+        push @rows, {
+            id    => $i,
+            score => ($i * 7 + 3) % 100,
+            level => $i % 5 == 0 ? "high" : ($i % 3 == 0 ? "mid" : "low"),
+        }
+    }
+    Arrow::write($path, \@rows)
+    p "input:  $path (1000 synthetic rows)"
+}
+
+p ""
+val $info = Parquet::inspect($path)
+val $sch  = Parquet::schema($path)
+val $n    = Parquet::count($path)
+var @cstats = Parquet::stats($path)
+
+p "rows:    $n"
+p "size:    " . ($info->{size} // "?") . " bytes"
+p "schema:  " . scalar(@{ $sch->{fields} }) . " field(s)"
+p ""
+
+p "── per-column stats ──"
+for val $col (@cstats) {
+    val $name = $col->{name}       // "?"
+    val $null = $col->{null_count} // 0
+    p "  $name"
+    p "    nulls: $null"
+    if (defined $col->{min}) { p "    min:   $col->{min}" }
+    if (defined $col->{max}) { p "    max:   $col->{max}" }
+}
+
+if ($cleanup) {
+    unlink $path
+    p ""
+    p "cleaned: $path"
+}
