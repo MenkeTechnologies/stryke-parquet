@@ -8,7 +8,7 @@ var ($src, $dst, $codec) = @ARGV
 die "usage: recompress.stk SRC DST [codec]\n" unless defined $dst
 $codec //= "zstd"
 
-val $r = Parquet::compress $src, $dst, codec => $codec
+val $r = Parquet::compress($src, $dst, codec => $codec)
 val $saved = $r->{src_size} - $r->{dst_size}
 val $pct = $r->{src_size} > 0 ? (100.0 * $saved / $r->{src_size}) : 0
 p sprintf("%s: %d → %d bytes (%+.1f%% with %s)",
