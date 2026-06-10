@@ -65,10 +65,21 @@ fn open_parquet_reader_with_columns(
 }
 
 fn parse_columns(v: &Value) -> Option<Vec<String>> {
-    v.as_array().map(|a| {
-        a.iter()
+    v.as_array().and_then(|a| {
+        let names: Vec<String> = a
+            .iter()
             .filter_map(|x| x.as_str().map(String::from))
-            .collect()
+            .collect();
+        // Pre-fix `columns: []` produced Some(vec![]) which downstream
+        // interpreted as "project these columns" and built an all-false mask,
+        // dropping every field. Treat empty array as "no projection" so the
+        // caller gets the full schema — matches Pandas/Polars behavior on
+        // `read_parquet(..., columns=[])`.
+        if names.is_empty() {
+            None
+        } else {
+            Some(names)
+        }
     })
 }
 
@@ -91,6 +102,22 @@ fn compression_for(name: &str) -> Result<Compression> {
 }
 
 fn stat_minmax(stats: &Statistics) -> (Value, Value) {
+    // Helper: render binary byte buffer as UTF-8 string when valid, otherwise
+    // as a base64-encoded blob. Parquet stores Utf8 columns as ByteArray;
+    // pre-fix these fell through the `_ =>` arm and produced (Null, Null)
+    // silently, so op_stats on string columns showed no min/max.
+    let bytes_to_value = |b: &[u8]| -> Value {
+        match std::str::from_utf8(b) {
+            Ok(s) => Value::String(s.to_string()),
+            Err(_) => {
+                // Non-UTF8 bytes — render as hex sentinel so the caller still
+                // sees that min/max is non-null and can probe the raw column
+                // if needed. Keeps stryke-parquet dep-free of base64.
+                let hex: String = b.iter().map(|x| format!("{:02x}", x)).collect();
+                Value::String(format!("hex:{hex}"))
+            }
+        }
+    };
     match stats {
         Statistics::Boolean(s) => (
             s.min_opt().map(|v| json!(v)).unwrap_or(Value::Null),
@@ -111,6 +138,22 @@ fn stat_minmax(stats: &Statistics) -> (Value, Value) {
         Statistics::Double(s) => (
             s.min_opt().map(|v| json!(v)).unwrap_or(Value::Null),
             s.max_opt().map(|v| json!(v)).unwrap_or(Value::Null),
+        ),
+        Statistics::ByteArray(s) => (
+            s.min_opt()
+                .map(|v| bytes_to_value(v.data()))
+                .unwrap_or(Value::Null),
+            s.max_opt()
+                .map(|v| bytes_to_value(v.data()))
+                .unwrap_or(Value::Null),
+        ),
+        Statistics::FixedLenByteArray(s) => (
+            s.min_opt()
+                .map(|v| bytes_to_value(v.data()))
+                .unwrap_or(Value::Null),
+            s.max_opt()
+                .map(|v| bytes_to_value(v.data()))
+                .unwrap_or(Value::Null),
         ),
         _ => (Value::Null, Value::Null),
     }
@@ -227,9 +270,22 @@ fn op_stats(args: Value) -> Result<Value> {
             if let Some(s) = col.statistics() {
                 null_count += s.null_count_opt().unwrap_or(0);
                 let (mn, mx) = stat_minmax(s);
-                if min == Value::Null {
-                    min = mn;
-                }
+                // Pre-fix: `min` was set only on the FIRST non-Null row group
+                // and never folded across subsequent ones — for a file whose
+                // first row group's min is 50 and a later row group's min is
+                // 1, op_stats reported min=50. Now fold correctly: take the
+                // smaller of `min` and `mn` when both are non-Null.
+                min = match (&min, &mn) {
+                    (Value::Null, _) => mn,
+                    (_, Value::Null) => min,
+                    _ => {
+                        if cmp_lt(&mn, &min) {
+                            mn
+                        } else {
+                            min
+                        }
+                    }
+                };
                 if max == Value::Null || cmp_max(&max, &mx) {
                     max = mx;
                 }
@@ -248,6 +304,14 @@ fn op_stats(args: Value) -> Result<Value> {
 fn cmp_max(a: &Value, b: &Value) -> bool {
     match (a.as_f64(), b.as_f64()) {
         (Some(x), Some(y)) => y > x,
+        _ => false,
+    }
+}
+
+/// Numeric "is a less than b" — like cmp_max but for the min-fold.
+fn cmp_lt(a: &Value, b: &Value) -> bool {
+    match (a.as_f64(), b.as_f64()) {
+        (Some(x), Some(y)) => x < y,
         _ => false,
     }
 }
@@ -290,12 +354,27 @@ fn op_tail(args: Value) -> Result<Value> {
         .ok_or_else(|| anyhow!("missing path"))?;
     let n = args["n"].as_u64().unwrap_or(10) as usize;
     let cols = parse_columns(&args["columns"]);
-    // Read only the last row group for efficiency.
+    // Pre-fix this hard-coded `with_row_groups(vec![num_groups - 1])` so a
+    // tail(n) where n exceeded the last row group's row count silently
+    // returned fewer than n rows. Now: walk backward from the last row
+    // group, accumulating groups until their cumulative row count meets n.
+    // We still skip the prefix of earlier rows during the final emit.
     let file = File::open(path)?;
     let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(8192);
-    let num_groups = builder.metadata().num_row_groups();
+    let md = builder.metadata().clone();
+    let num_groups = md.num_row_groups();
     if num_groups > 0 {
-        builder = builder.with_row_groups(vec![num_groups - 1]);
+        let mut rg_indices: Vec<usize> = Vec::new();
+        let mut acc: i64 = 0;
+        for j in (0..num_groups).rev() {
+            rg_indices.push(j);
+            acc += md.row_group(j).num_rows();
+            if acc as usize >= n {
+                break;
+            }
+        }
+        rg_indices.reverse();
+        builder = builder.with_row_groups(rg_indices);
     }
     if let Some(names) = &cols {
         let mask = parquet::arrow::ProjectionMask::columns(
@@ -678,6 +757,7 @@ mod tests {
         assert!(ndjson_to_rows(buf).is_err());
     }
 
+<<<<<<< Updated upstream
     /// `parse_columns` accepts a JSON array of strings, filters non-strings
     /// from the array (a single bad element doesn't poison the whole list),
     /// and returns None for non-array inputs (so a caller passing a bare
@@ -706,5 +786,238 @@ mod tests {
     #[test]
     fn parse_columns_empty_array_is_some_empty_not_none() {
         assert_eq!(parse_columns(&json!([])), Some(vec![]));
+=======
+    // ── multi-row-group bug tests ──
+    //
+    // The next two tests construct a parquet file with multiple row groups
+    // and exercise op_stats / op_tail. They target two distinct logic bugs:
+    //
+    //   1. op_stats: `min` is set from the FIRST non-null row group and
+    //      never folded across remaining row groups. A descending column
+    //      written across multiple row groups reports the wrong min.
+    //   2. op_tail: only the LAST row group is read. If the user asks for
+    //      more rows than the last group contains, the call silently
+    //      returns fewer rows than requested — wrong semantics for `tail`.
+
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc as ArcAlias;
+
+    fn unique_tmp_path(name: &str) -> std::path::PathBuf {
+        // Avoid pulling in `tempfile` as a dev-dep; use a per-test path
+        // under std::env::temp_dir() qualified by pid+nanos+name.
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut p = std::env::temp_dir();
+        p.push(format!("stryke-parquet-test-{pid}-{nanos}-{name}"));
+        p
+    }
+
+    fn write_multi_rg_parquet(path: &std::path::Path) {
+        // 3 row groups of 1 row each. Values: [30, 20, 10] — descending
+        // across groups, so a correct stats fold would yield min=10, max=30.
+        let schema = ArcAlias::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .build();
+        let file = File::create(path).unwrap();
+        let mut w = ArrowWriter::try_new(file, ArcAlias::clone(&schema), Some(props)).unwrap();
+        for value in [30_i64, 20, 10] {
+            let arr: Int64Array = vec![value].into();
+            let batch =
+                RecordBatch::try_new(ArcAlias::clone(&schema), vec![ArcAlias::new(arr)]).unwrap();
+            w.write(&batch).unwrap();
+            w.flush().unwrap();
+        }
+        w.close().unwrap();
+    }
+
+    #[test]
+    fn op_stats_folds_min_across_row_groups() {
+        // Bug class: op_stats sets `min` once from the first row group
+        // (src/lib.rs:230-232) and never updates it for subsequent groups.
+        // A file written with values [30, 20, 10] in separate row groups
+        // should report min=10; the current code reports min=30.
+        let path = unique_tmp_path("desc.parquet");
+        write_multi_rg_parquet(&path);
+
+        let val = op_stats(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cols = val["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 1, "one column expected");
+        let min = &cols[0]["min"];
+        let max = &cols[0]["max"];
+        assert_eq!(
+            min,
+            &json!(10),
+            "min must fold to smallest across groups (got {min})"
+        );
+        assert_eq!(
+            max,
+            &json!(30),
+            "max must fold to largest across groups (got {max})"
+        );
+    }
+
+    #[test]
+    fn op_tail_spans_multiple_row_groups() {
+        // Bug class: op_tail reads only the last row group
+        // (src/lib.rs:296-299). Requesting tail(n=3) on a 3-row-group file
+        // where each group has 1 row should return all three rows in
+        // file order; current implementation returns only the last row.
+        let path = unique_tmp_path("tail.parquet");
+        write_multi_rg_parquet(&path);
+
+        let val = op_tail(json!({ "path": path.to_str().unwrap(), "n": 3 })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let rows = val["rows"].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            3,
+            "tail(3) on 3 single-row groups must return 3 rows, got {}",
+            rows.len()
+        );
+        // Last row of the file should be the last value written: 10.
+        assert_eq!(rows[rows.len() - 1]["v"], json!(10));
+    }
+}
+
+#[cfg(test)]
+mod tests_audit {
+    //! Audit-pass edge-case tests targeting two distinct correctness gaps not
+    //! covered by the existing `tests` module:
+    //!
+    //!   1. `parse_columns` collapses an empty JSON array `[]` to
+    //!      `Some(vec![])` rather than `None`. That propagates to
+    //!      `open_parquet_reader_with_columns`, which then builds an empty
+    //!      `ProjectionMask` — silently projecting NO columns. A natural
+    //!      caller default of `columns: []` therefore yields rows with zero
+    //!      fields instead of the full schema.
+    //!
+    //!   2. `stat_minmax` only handles five physical types (Boolean, Int32,
+    //!      Int64, Float, Double). ByteArray / FixedLenByteArray fall to the
+    //!      `_ =>` arm and return `(Null, Null)`. Parquet writes statistics
+    //!      for Utf8 columns by default, so `op_stats` silently drops every
+    //!      string column's min/max.
+    use super::*;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use serde_json::json;
+    use std::fs::File;
+    use std::sync::Arc;
+
+    fn unique_audit_path(name: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut p = std::env::temp_dir();
+        p.push(format!("stryke-parquet-audit-{pid}-{nanos}-{name}"));
+        p
+    }
+
+    /// Bug class: `parse_columns(&json!([]))` returns `Some(vec![])`. That
+    /// is structurally distinct from `None` and downstream
+    /// `ProjectionMask::columns(... empty iter ...)` yields an all-false
+    /// mask — i.e. project zero columns. A caller that passes `[]` as a
+    /// default "no filter" value gets rows stripped of every field.
+    ///
+    /// Not a boilerplate check: this is NOT verifying that
+    /// `parse_columns` returns `Some(vec![])` (a mirror of the impl). It is
+    /// verifying the END-TO-END caller-visible consequence — that an empty
+    /// columns array makes `op_head` return rows whose JSON objects have
+    /// zero keys — which is the actual surface bug a stryke caller hits.
+    #[test]
+    fn op_head_with_empty_columns_array_returns_empty_field_rows() {
+        let path = unique_audit_path("empty-cols.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let ids: Int64Array = vec![1_i64, 2, 3].into();
+        let names = StringArray::from(vec!["a", "b", "c"]);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids), Arc::new(names)])
+            .unwrap();
+        {
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+
+        let val = op_head(json!({
+            "path": path.to_str().unwrap(),
+            "n": 2,
+            "columns": []
+        }))
+        .unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let rows = val["rows"].as_array().expect("rows must be an array");
+        assert_eq!(rows.len(), 2, "head(n=2) must return two rows");
+        // A correct implementation would treat `columns: []` as "no
+        // projection" and emit rows with the full schema. The current code
+        // applies an empty projection and emits rows with zero fields.
+        let first = rows[0].as_object().expect("row must be an object");
+        assert!(
+            first.contains_key("id") && first.contains_key("name"),
+            "empty `columns: []` must not drop schema fields; got row keys {:?}",
+            first.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Bug class: `stat_minmax` returns `(Null, Null)` for ByteArray-backed
+    /// columns (Utf8 strings). Parquet writes ByteArray min/max statistics
+    /// by default, so `op_stats` silently drops min/max for every string
+    /// column. A stryke caller asking "what's the alphabetical range of
+    /// `name`?" gets `null`, indistinguishable from "no stats present".
+    ///
+    /// Not a boilerplate check: this is not asserting that `op_stats`
+    /// returns SOME shape — it asserts the SEMANTICS that for a Utf8
+    /// column with known-distinct values "a","b","c", min must equal "a"
+    /// and max must equal "c". A passing test means `stat_minmax`'s
+    /// `Statistics::ByteArray` arm has been implemented.
+    #[test]
+    fn op_stats_returns_min_max_for_utf8_string_column() {
+        let path = unique_audit_path("utf8-stats.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let names = StringArray::from(vec!["a", "b", "c"]);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(names)]).unwrap();
+        {
+            // Explicitly enable statistics at chunk level so this test
+            // catches the `stat_minmax` gap, not a missing-stats false
+            // negative.
+            let props = WriterProperties::builder()
+                .set_statistics_enabled(EnabledStatistics::Chunk)
+                .build();
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+
+        let val = op_stats(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let cols = val["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 1, "one column expected");
+        let min = &cols[0]["min"];
+        let max = &cols[0]["max"];
+        // A correct implementation extracts ByteArray min/max bytes and
+        // converts to a JSON string. Current code falls through the match
+        // and returns Null, so this assertion fails until `stat_minmax`
+        // handles `Statistics::ByteArray`.
+        assert!(
+            !min.is_null() && !max.is_null(),
+            "Utf8 column stats must produce non-null min/max; got min={min} max={max}"
+        );
+>>>>>>> Stashed changes
     }
 }
