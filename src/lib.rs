@@ -677,4 +677,34 @@ mod tests {
         let buf = &[0xFF_u8, 0xFE, b'\n'];
         assert!(ndjson_to_rows(buf).is_err());
     }
+
+    /// `parse_columns` accepts a JSON array of strings, filters non-strings
+    /// from the array (a single bad element doesn't poison the whole list),
+    /// and returns None for non-array inputs (so a caller passing a bare
+    /// string `"id,name"` doesn't get silently wrapped). Pin the contract
+    /// so refactors can't accidentally start panicking on `[]`, returning
+    /// `Some([])` on null, or stringifying numbers.
+    #[test]
+    fn parse_columns_array_of_strings_round_trips() {
+        let v = parse_columns(&json!(["id", "name"]));
+        assert_eq!(v, Some(vec!["id".to_string(), "name".to_string()]));
+    }
+
+    #[test]
+    fn parse_columns_filters_non_strings() {
+        let v = parse_columns(&json!(["id", 42, "name", null]));
+        assert_eq!(v, Some(vec!["id".to_string(), "name".to_string()]));
+    }
+
+    #[test]
+    fn parse_columns_non_array_is_none() {
+        assert_eq!(parse_columns(&json!("id,name")), None);
+        assert_eq!(parse_columns(&Value::Null), None);
+        assert_eq!(parse_columns(&json!({"cols": ["id"]})), None);
+    }
+
+    #[test]
+    fn parse_columns_empty_array_is_some_empty_not_none() {
+        assert_eq!(parse_columns(&json!([])), Some(vec![]));
+    }
 }
