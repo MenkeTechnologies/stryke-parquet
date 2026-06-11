@@ -228,7 +228,6 @@ required.
 
 ```sh
 make             # release build
-make debug
 make test
 make install
 make clean
@@ -246,10 +245,13 @@ stryke-parquet/
     Parquet.stk                    # `use Parquet` — thin wrapper around the FFI symbols
   t/
     test_parquet.stk
+    test_stryke_parquet_surface.stk
   examples/
+    discover.stk
     inspect.stk
     head_stats.stk
     recompress.stk
+    stats.stk
   .github/workflows/
     ci.yml                         # mkdemo + diagnostic ops
     release.yml                    # cross-compile + GH release on tag push
