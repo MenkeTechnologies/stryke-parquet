@@ -1023,4 +1023,48 @@ mod tests_audit {
             "Utf8 column stats must produce non-null min/max; got min={min} max={max}"
         );
     }
+
+    // ── cmp_lt (op_stats min-fold) ──
+    //
+    // `cmp_lt` drives the min-fold at line 282: `if cmp_lt(&mn, &min)`.
+    // `cmp_max` is tested above but `cmp_lt` is exercised only indirectly
+    // through op_stats. These pin its contract directly so a refactor that
+    // flips the comparison, drops the `as_f64()` short-circuit, or promotes
+    // on equality can't slip through.
+
+    /// Strict less-than: `cmp_lt(a, b)` is true iff `a < b`. The min-fold
+    /// only replaces the running min when the new value is *strictly*
+    /// smaller; equal mins across row groups must NOT trigger a replace
+    /// (off-by-one at the boundary — a `<=` would needlessly churn `min`
+    /// and, combined with a non-numeric value, could promote Null).
+    #[test]
+    fn cmp_lt_strict_and_directional() {
+        assert!(cmp_lt(&json!(1.0), &json!(2.0)), "1 < 2 must be true");
+        assert!(cmp_lt(&json!(1), &json!(2)), "integer JSON path via as_f64");
+        assert!(!cmp_lt(&json!(2.0), &json!(1.0)), "2 < 1 must be false");
+        // Boundary: equal values are not strictly less-than. If this became
+        // true, op_stats would replace `min` with an equal `mn` on every row
+        // group — harmless for numbers but a `<=` plus the Null short-circuit
+        // below is what guards the fold.
+        assert!(!cmp_lt(&json!(5), &json!(5)), "equal is not strictly-less");
+        assert!(!cmp_lt(&json!(-3), &json!(-3)));
+    }
+
+    /// Non-numeric operands must short-circuit to `false`. In op_stats the
+    /// min-fold sees `cmp_lt(&mn, &min)`; if `mn` is a string min (ByteArray
+    /// column) or a Null, `as_f64()` yields None and the fold must keep the
+    /// existing `min` rather than swap in an unordered value. A regression to
+    /// e.g. lexicographic string compare would silently corrupt min for
+    /// string columns folded across row groups.
+    #[test]
+    fn cmp_lt_non_numeric_is_false() {
+        assert!(!cmp_lt(&json!("a"), &json!("b")), "string operands → false");
+        assert!(!cmp_lt(&Value::Null, &json!(5)), "Null lhs → false");
+        assert!(!cmp_lt(&json!(5), &Value::Null), "Null rhs → false");
+        assert!(!cmp_lt(&json!([1]), &json!([2])), "array operands → false");
+        assert!(
+            !cmp_lt(&json!(true), &json!(false)),
+            "bool operands → false"
+        );
+    }
 }
