@@ -29,5 +29,8 @@ assert_ok exists &Parquet::to_json, "Parquet::to_json exists"
 assert_ok exists &Parquet::stream, "Parquet::stream exists"
 assert_ok exists &Parquet::to_csv, "Parquet::to_csv exists"
 assert_ok exists &Parquet::compress, "Parquet::compress exists"
+assert_ok exists &Parquet::column_names, "Parquet::column_names exists"
+assert_ok exists &Parquet::column_count, "Parquet::column_count exists"
+assert_ok exists &Parquet::is_empty, "Parquet::is_empty exists"
 
 test_run

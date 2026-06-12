@@ -139,3 +139,22 @@ fn Parquet::_mkdemo ($path) {
     Parquet::_decode("mkdemo", parquet__mkdemo(to_json({ path => $path })))
 }
 
+
+# ── convenience composites ──────────────────────────────────────────
+#
+# Pure-stryke helpers over schema / count — no new FFI.
+
+## Column names in file order. column_names("data.parquet") → ["id","name",…].
+fn Parquet::column_names ($path) {
+    [ map { $_->{name} } @{ Parquet::schema($path)->{fields} } ]
+}
+
+## Number of columns in the file's schema.
+fn Parquet::column_count ($path) {
+    scalar @{ Parquet::schema($path)->{fields} }
+}
+
+## True if the file has zero data rows (schema may still be present).
+fn Parquet::is_empty ($path) {
+    Parquet::count($path) == 0 ? 1 : 0
+}

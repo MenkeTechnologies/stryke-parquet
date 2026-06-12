@@ -140,6 +140,17 @@ Parquet::to_csv     $path, %opts → $csv | $path   # opts: output, columns
 Parquet::compress   $src, $dst, %opts → \%resp    # opts: codec, row_group
 ```
 
+### Convenience composites
+
+Pure-stryke helpers over `schema` / `count` — no extra file reads beyond
+the call they wrap.
+
+```stryke
+Parquet::column_names $path → \@names      # schema field names, in file order
+Parquet::column_count $path → $n           # number of columns
+Parquet::is_empty     $path → 1 | 0        # count == 0 (schema may still exist)
+```
+
 ### `inspect` shape
 
 ```json
