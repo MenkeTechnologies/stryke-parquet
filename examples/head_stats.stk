@@ -15,13 +15,13 @@ for val $f (@{ $sch->{fields} }) {
 }
 
 p "=== head 5 ==="
-val @rows = Parquet::head $path, n => 5
+var @rows = Parquet::head $path, n => 5
 for val $r (@rows) {
     p to_json $r
 }
 
 p "=== column stats ==="
-val @stats = Parquet::stats $path
+var @stats = Parquet::stats $path
 for val $s (@stats) {
     p sprintf("  %-20s nulls=%-6d  min=%-15s  max=%s",
               $s->{name}, $s->{null_count} // 0,
