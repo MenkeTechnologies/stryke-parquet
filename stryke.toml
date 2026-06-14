@@ -25,6 +25,8 @@ exports = [
     "parquet__from_csv",
     "parquet__from_json",
     "parquet__merge",
+    "parquet__write",
+    "parquet__metadata",
     "parquet__mkdemo",
 ]
 

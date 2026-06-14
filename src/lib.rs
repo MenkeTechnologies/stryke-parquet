@@ -606,6 +606,64 @@ fn op_merge(args: Value) -> Result<Value> {
     Ok(json!({"dst": dst, "files": srcs.len(), "rows": rows, "compression": compression}))
 }
 
+fn op_write(args: Value) -> Result<Value> {
+    use arrow_json::reader::{infer_json_schema_from_seekable, ReaderBuilder as JsonReaderBuilder};
+    use std::io::Cursor;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let rows = args["rows"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing rows (an array of objects)"))?;
+    if rows.is_empty() {
+        return Err(anyhow!("rows must be non-empty"));
+    }
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    // Serialize the in-memory rows to NDJSON once, then drive the same
+    // arrow-json schema-inference + read path `from_json` uses on a file.
+    let mut nd = Vec::<u8>::new();
+    for r in rows {
+        serde_json::to_writer(&mut nd, r)?;
+        nd.push(b'\n');
+    }
+    let (schema, _) = infer_json_schema_from_seekable(Cursor::new(nd.as_slice()), None)?;
+    let schema: SchemaRef = Arc::new(schema);
+    let reader = JsonReaderBuilder::new(Arc::clone(&schema)).build(Cursor::new(nd.as_slice()))?;
+    let props = WriterProperties::builder()
+        .set_compression(compression_for(&compression)?)
+        .build();
+    let file = File::create(dst)?;
+    let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
+    let mut written = 0;
+    for batch in reader {
+        let b = batch?;
+        written += b.num_rows();
+        w.write(&b)?;
+    }
+    w.close()?;
+    Ok(json!({"dst": dst, "rows": written, "compression": compression}))
+}
+
+fn op_metadata(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let fm = r.metadata().file_metadata();
+    // Key-value file metadata (writer-stamped). Distinct from column stats.
+    let kv: serde_json::Map<String, Value> = match fm.key_value_metadata() {
+        Some(pairs) => pairs
+            .iter()
+            .map(|p| (p.key.clone(), json!(p.value)))
+            .collect(),
+        None => serde_json::Map::new(),
+    };
+    Ok(json!({
+        "path": path,
+        "metadata": kv,
+        "created_by": fm.created_by(),
+        "version": fm.version(),
+    }))
+}
+
 fn op_mkdemo(args: Value) -> Result<Value> {
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -751,6 +809,16 @@ pub extern "C" fn parquet__from_json(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__merge(args: *const c_char) -> *const c_char {
     ffi_call(args, op_merge)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__write(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_write)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__metadata(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_metadata)
 }
 
 #[no_mangle]
@@ -1235,6 +1303,46 @@ mod tests_audit {
         assert_eq!(r["rows"], json!(2), "two NDJSON lines → two rows; got {r}");
         assert_eq!(count_parquet_rows(&out), 2);
         let _ = std::fs::remove_file(&nd);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_write_builds_parquet_from_in_memory_rows() {
+        let out = unique_audit_path("write_rows.parquet");
+        let r = op_write(json!({
+            "dst": out.to_str().unwrap(),
+            "rows": [
+                {"id": 1, "name": "alice"},
+                {"id": 2, "name": "bob"},
+                {"id": 3, "name": "carol"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(r["rows"], json!(3), "all in-memory rows written; got {r}");
+        assert_eq!(count_parquet_rows(&out), 3);
+        let reader = open_parquet_reader(&out, 8192).unwrap();
+        assert_eq!(reader.schema().fields().len(), 2, "id + name inferred");
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_metadata_reads_writer_kv_and_created_by() {
+        // mkdemo writes a parquet; ArrowWriter stamps `created_by` + an
+        // ARROW:schema key-value entry. metadata must surface both.
+        let out = unique_audit_path("meta.parquet");
+        op_mkdemo(json!({"path": out.to_str().unwrap()})).unwrap();
+        let m = op_metadata(json!({"path": out.to_str().unwrap()})).unwrap();
+        assert!(
+            m["created_by"]
+                .as_str()
+                .is_some_and(|s| s.contains("parquet")),
+            "created_by should name the writer; got {m}"
+        );
+        // The arrow writer always embeds an ARROW:schema kv entry.
+        assert!(
+            m["metadata"].get("ARROW:schema").is_some(),
+            "arrow writer kv metadata must be surfaced; got {m}"
+        );
         let _ = std::fs::remove_file(&out);
     }
 

@@ -196,3 +196,22 @@ fn Parquet::merge ($srcs, $dst, %opts) {
             compression => ($opts{codec} // $opts{compression}),
         })))
 }
+
+## Write in-memory $rows (arrayref of hashrefs) to a parquet $dst. Schema is
+## inferred from the rows. opts: codec/compression (default zstd).
+## Returns { dst, rows, compression }.
+fn Parquet::write ($rows, $dst, %opts) {
+    die "Parquet::write: rows must be an arrayref of hashrefs" unless ref($rows) eq "ARRAY"
+    Parquet::_decode("write",
+        parquet__write(to_json({
+            rows => $rows, dst => $dst,
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}
+
+## Read a parquet file's writer key-value metadata + created_by + version.
+## Returns { path, metadata => {...}, created_by, version }.
+fn Parquet::metadata ($path) {
+    die "Parquet::metadata: file `$path` not found" unless -e $path
+    Parquet::_decode("metadata", parquet__metadata(to_json({ path => $path })))
+}
