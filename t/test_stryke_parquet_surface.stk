@@ -41,4 +41,5 @@ assert_ok exists &Parquet::merge, "Parquet::merge exists"
 assert_ok exists &Parquet::write, "Parquet::write exists"
 assert_ok exists &Parquet::metadata, "Parquet::metadata exists"
 
+assert_ok exists &Parquet::write_partitioned, "Parquet::write_partitioned exists"
 test_run

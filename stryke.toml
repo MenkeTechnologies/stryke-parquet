@@ -26,6 +26,7 @@ exports = [
     "parquet__from_json",
     "parquet__merge",
     "parquet__write",
+    "parquet__write_partitioned",
     "parquet__metadata",
     "parquet__mkdemo",
 ]

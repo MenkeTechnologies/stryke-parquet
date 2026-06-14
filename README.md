@@ -141,6 +141,7 @@ Parquet::compress   $src, $dst, %opts → \%resp    # opts: codec, row_group
 Parquet::from_csv   $src, $dst, %opts → \%resp    # CSV → parquet; opts: header, delimiter, codec
 Parquet::from_json  $src, $dst, %opts → \%resp    # NDJSON → parquet; opts: codec
 Parquet::write      \@rows, $dst, %opts → \%resp  # in-memory rows (hashrefs) → parquet; opts: codec
+Parquet::write_partitioned \@rows, $dst, $column, %opts → \%resp  # Hive col=val/ dirs; opts: codec
 Parquet::merge      \@srcs, $dst, %opts → \%resp  # concat same-schema files; opts: codec
 Parquet::metadata   $path → \%resp                # writer kv metadata + created_by + version
 ```

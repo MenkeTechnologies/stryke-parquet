@@ -642,6 +642,77 @@ fn op_write(args: Value) -> Result<Value> {
     Ok(json!({"dst": dst, "rows": written, "compression": compression}))
 }
 
+fn op_write_partitioned(args: Value) -> Result<Value> {
+    use arrow_json::reader::{infer_json_schema_from_seekable, ReaderBuilder as JsonReaderBuilder};
+    use std::collections::BTreeMap;
+    use std::io::Cursor;
+    let dst = args["dst"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing dst (base dir)"))?;
+    let rows = args["rows"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing rows (an array of objects)"))?;
+    if rows.is_empty() {
+        return Err(anyhow!("rows must be non-empty"));
+    }
+    let part_col = args["partition_by"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing partition_by (column name)"))?;
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    // One schema for every partition (inferred from all rows) so the dataset is
+    // self-consistent. The partition column is retained in each file.
+    let mut all_nd = Vec::<u8>::new();
+    for r in rows {
+        serde_json::to_writer(&mut all_nd, r)?;
+        all_nd.push(b'\n');
+    }
+    let (schema, _) = infer_json_schema_from_seekable(Cursor::new(all_nd.as_slice()), None)?;
+    let schema: SchemaRef = Arc::new(schema);
+    // Bucket rows by the partition column's (stringified) value, deterministically.
+    let mut buckets: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for r in rows {
+        let v = r
+            .get(part_col)
+            .ok_or_else(|| anyhow!("row missing partition column `{}`", part_col))?;
+        let key = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let buf = buckets.entry(key).or_default();
+        serde_json::to_writer(&mut *buf, r)?;
+        buf.push(b'\n');
+    }
+    let mut parts = Vec::new();
+    for (value, nd) in &buckets {
+        // Hive-style `col=value/` directory. `/` in a value would break the
+        // path, so it's replaced with `_`.
+        let dir = format!("{}/{}={}", dst, part_col, value.replace('/', "_"));
+        std::fs::create_dir_all(&dir)?;
+        let path = format!("{}/part-0.parquet", dir);
+        let props = WriterProperties::builder()
+            .set_compression(compression_for(&compression)?)
+            .build();
+        let reader =
+            JsonReaderBuilder::new(Arc::clone(&schema)).build(Cursor::new(nd.as_slice()))?;
+        let file = File::create(&path)?;
+        let mut w = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props))?;
+        let mut written = 0;
+        for batch in reader {
+            let b = batch?;
+            written += b.num_rows();
+            w.write(&b)?;
+        }
+        w.close()?;
+        parts.push(json!({"value": value, "path": path, "rows": written}));
+    }
+    Ok(json!({
+        "dst": dst,
+        "partition_by": part_col,
+        "partitions": parts,
+        "total_rows": rows.len(),
+    }))
+}
+
 fn op_metadata(args: Value) -> Result<Value> {
     let path = args["path"]
         .as_str()
@@ -814,6 +885,11 @@ pub extern "C" fn parquet__merge(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__write(args: *const c_char) -> *const c_char {
     ffi_call(args, op_write)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__write_partitioned(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_write_partitioned)
 }
 
 #[no_mangle]
@@ -1323,6 +1399,34 @@ mod tests_audit {
         let reader = open_parquet_reader(&out, 8192).unwrap();
         assert_eq!(reader.schema().fields().len(), 2, "id + name inferred");
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_write_partitioned_splits_by_column_into_hive_dirs() {
+        let base = unique_audit_path("partds");
+        let r = op_write_partitioned(json!({
+            "dst": base.to_str().unwrap(),
+            "partition_by": "region",
+            "rows": [
+                {"region": "us", "id": 1},
+                {"region": "eu", "id": 2},
+                {"region": "us", "id": 3},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(r["total_rows"], json!(3));
+        let parts = r["partitions"].as_array().unwrap();
+        assert_eq!(parts.len(), 2, "two distinct regions → two partitions");
+        // BTreeMap order: eu (1 row), us (2 rows).
+        assert_eq!(parts[0]["value"], json!("eu"));
+        assert_eq!(parts[0]["rows"], json!(1));
+        assert_eq!(parts[1]["value"], json!("us"));
+        assert_eq!(parts[1]["rows"], json!(2));
+        // Hive `region=us/part-0.parquet` exists and holds 2 rows.
+        let us = base.join("region=us").join("part-0.parquet");
+        assert!(us.exists(), "expected {us:?}");
+        assert_eq!(count_parquet_rows(&us), 2);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

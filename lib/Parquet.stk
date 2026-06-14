@@ -215,3 +215,16 @@ fn Parquet::metadata ($path) {
     die "Parquet::metadata: file `$path` not found" unless -e $path
     Parquet::_decode("metadata", parquet__metadata(to_json({ path => $path })))
 }
+
+## Hive-partition in-memory $rows (arrayref of hashrefs) by $column into $dst,
+## writing $dst/$column=VALUE/part-0.parquet per distinct value. The partition
+## column is retained in each file. opts: codec/compression (default zstd).
+## Returns { dst, partition_by, partitions => [{value, path, rows}], total_rows }.
+fn Parquet::write_partitioned ($rows, $dst, $column, %opts) {
+    die "Parquet::write_partitioned: rows must be an arrayref of hashrefs" unless ref($rows) eq "ARRAY"
+    Parquet::_decode("write_partitioned",
+        parquet__write_partitioned(to_json({
+            rows => $rows, dst => $dst, partition_by => $column,
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}
