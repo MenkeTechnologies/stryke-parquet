@@ -506,6 +506,106 @@ fn op_compress(args: Value) -> Result<Value> {
     }))
 }
 
+fn op_from_csv(args: Value) -> Result<Value> {
+    use arrow_csv::reader::{Format, ReaderBuilder as CsvReaderBuilder};
+    let src = args["src"].as_str().ok_or_else(|| anyhow!("missing src"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let header = args["header"].as_bool().unwrap_or(true);
+    let delimiter = args["delimiter"]
+        .as_str()
+        .and_then(|s| s.bytes().next())
+        .unwrap_or(b',');
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    let format = Format::default()
+        .with_header(header)
+        .with_delimiter(delimiter);
+    // First pass infers the schema; second pass (fresh handle) reads the data.
+    let (schema, _) = format.infer_schema(File::open(src)?, Some(1024))?;
+    let schema: SchemaRef = Arc::new(schema);
+    let csv = CsvReaderBuilder::new(Arc::clone(&schema))
+        .with_format(format)
+        .build(File::open(src)?)?;
+    let props = WriterProperties::builder()
+        .set_compression(compression_for(&compression)?)
+        .build();
+    let file = File::create(dst)?;
+    let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
+    let mut rows = 0;
+    for batch in csv {
+        let b = batch?;
+        rows += b.num_rows();
+        w.write(&b)?;
+    }
+    w.close()?;
+    Ok(json!({"dst": dst, "rows": rows, "compression": compression}))
+}
+
+fn op_from_json(args: Value) -> Result<Value> {
+    use arrow_json::reader::{infer_json_schema_from_seekable, ReaderBuilder as JsonReaderBuilder};
+    use std::io::BufReader;
+    let src = args["src"].as_str().ok_or_else(|| anyhow!("missing src"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    // NDJSON (one object per line). Infer schema, then re-open for the data pass.
+    let (schema, _) =
+        infer_json_schema_from_seekable(BufReader::new(File::open(src)?), Some(1024))?;
+    let schema: SchemaRef = Arc::new(schema);
+    let json =
+        JsonReaderBuilder::new(Arc::clone(&schema)).build(BufReader::new(File::open(src)?))?;
+    let props = WriterProperties::builder()
+        .set_compression(compression_for(&compression)?)
+        .build();
+    let file = File::create(dst)?;
+    let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
+    let mut rows = 0;
+    for batch in json {
+        let b = batch?;
+        rows += b.num_rows();
+        w.write(&b)?;
+    }
+    w.close()?;
+    Ok(json!({"dst": dst, "rows": rows, "compression": compression}))
+}
+
+fn op_merge(args: Value) -> Result<Value> {
+    let srcs = args["srcs"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing srcs (array of parquet paths)"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    if srcs.is_empty() {
+        return Err(anyhow!("srcs must be non-empty"));
+    }
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    // All inputs must share the first file's schema (ArrowWriter rejects mismatches).
+    let first = srcs[0]
+        .as_str()
+        .ok_or_else(|| anyhow!("srcs must be strings"))?;
+    let r0 = open_parquet_reader(Path::new(first), 8192)?;
+    let schema: SchemaRef = r0.schema();
+    let props = WriterProperties::builder()
+        .set_compression(compression_for(&compression)?)
+        .build();
+    let file = File::create(dst)?;
+    let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
+    let mut rows = 0;
+    for batch in r0 {
+        let b = batch?;
+        rows += b.num_rows();
+        w.write(&b)?;
+    }
+    for s in &srcs[1..] {
+        let p = s.as_str().ok_or_else(|| anyhow!("srcs must be strings"))?;
+        let r = open_parquet_reader(Path::new(p), 8192)?;
+        for batch in r {
+            let b = batch?;
+            rows += b.num_rows();
+            w.write(&b)?;
+        }
+    }
+    w.close()?;
+    Ok(json!({"dst": dst, "files": srcs.len(), "rows": rows, "compression": compression}))
+}
+
 fn op_mkdemo(args: Value) -> Result<Value> {
     use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
@@ -636,6 +736,21 @@ pub extern "C" fn parquet__to_csv(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__compress(args: *const c_char) -> *const c_char {
     ffi_call(args, op_compress)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__from_csv(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_from_csv)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__from_json(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_from_json)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__merge(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_merge)
 }
 
 #[no_mangle]
@@ -1066,5 +1181,87 @@ mod tests_audit {
             !cmp_lt(&json!(true), &json!(false)),
             "bool operands → false"
         );
+    }
+
+    // ── write paths: from_csv / from_json / merge ──
+    //
+    // These round-trip real data through the new write ops in-process (no FFI,
+    // no install, no release build) so the write logic is exercised under
+    // `cargo test`. They pin the contract callers depend on: row count
+    // preserved, schema inferred, and merge = sum of inputs.
+
+    fn count_parquet_rows(path: &std::path::Path) -> usize {
+        let r = open_parquet_reader(path, 8192).unwrap();
+        r.map(|b| b.unwrap().num_rows()).sum()
+    }
+
+    #[test]
+    fn op_from_csv_infers_schema_and_preserves_rows() {
+        let csv = unique_audit_path("from_csv.csv");
+        std::fs::write(
+            &csv,
+            "id,name,score\n1,alice,1.5\n2,bob,2.0\n3,carol,3.25\n",
+        )
+        .unwrap();
+        let out = unique_audit_path("from_csv.parquet");
+        let r = op_from_csv(json!({
+            "src": csv.to_str().unwrap(),
+            "dst": out.to_str().unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(r["rows"], json!(3), "row count must round-trip; got {r}");
+        assert_eq!(count_parquet_rows(&out), 3);
+        // header row inferred 3 columns, not folded into the data.
+        let reader = open_parquet_reader(&out, 8192).unwrap();
+        assert_eq!(reader.schema().fields().len(), 3, "id/name/score columns");
+        let _ = std::fs::remove_file(&csv);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_from_json_reads_ndjson_one_object_per_line() {
+        let nd = unique_audit_path("from_json.ndjson");
+        std::fs::write(
+            &nd,
+            "{\"id\":1,\"name\":\"alice\"}\n{\"id\":2,\"name\":\"bob\"}\n",
+        )
+        .unwrap();
+        let out = unique_audit_path("from_json.parquet");
+        let r = op_from_json(json!({
+            "src": nd.to_str().unwrap(),
+            "dst": out.to_str().unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(r["rows"], json!(2), "two NDJSON lines → two rows; got {r}");
+        assert_eq!(count_parquet_rows(&out), 2);
+        let _ = std::fs::remove_file(&nd);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_merge_sums_rows_of_same_schema_inputs() {
+        let csv = unique_audit_path("merge.csv");
+        std::fs::write(&csv, "id,name\n1,a\n2,b\n3,c\n").unwrap();
+        let part = unique_audit_path("merge_part.parquet");
+        op_from_csv(json!({
+            "src": csv.to_str().unwrap(),
+            "dst": part.to_str().unwrap(),
+        }))
+        .unwrap();
+        let out = unique_audit_path("merged.parquet");
+        let r = op_merge(json!({
+            "srcs": [part.to_str().unwrap(), part.to_str().unwrap()],
+            "dst": out.to_str().unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(r["files"], json!(2));
+        assert_eq!(
+            count_parquet_rows(&out),
+            6,
+            "merge of two 3-row files → 6 rows"
+        );
+        let _ = std::fs::remove_file(&csv);
+        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(&out);
     }
 }

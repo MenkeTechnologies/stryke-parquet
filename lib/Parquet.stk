@@ -158,3 +158,41 @@ fn Parquet::column_count ($path) {
 fn Parquet::is_empty ($path) {
     Parquet::count($path) == 0 ? 1 : 0
 }
+
+# ── write paths (CSV / JSON → parquet, merge) ────────────────────────
+
+## Build a parquet file from a CSV at $src. opts: header (default 1),
+## delimiter (single char, default ","), codec/compression (default zstd).
+## Schema is inferred from the first rows. Returns { dst, rows, compression }.
+fn Parquet::from_csv ($src, $dst, %opts) {
+    die "Parquet::from_csv: src `$src` not found" unless -e $src
+    Parquet::_decode("from_csv",
+        parquet__from_csv(to_json({
+            src => $src, dst => $dst,
+            header => ($opts{header} // 1),
+            delimiter => $opts{delimiter},
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}
+
+## Build a parquet file from NDJSON (one object per line) at $src. opts:
+## codec/compression (default zstd). Schema inferred. Returns { dst, rows }.
+fn Parquet::from_json ($src, $dst, %opts) {
+    die "Parquet::from_json: src `$src` not found" unless -e $src
+    Parquet::_decode("from_json",
+        parquet__from_json(to_json({
+            src => $src, dst => $dst,
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}
+
+## Concatenate parquet files in $srcs (arrayref) sharing one schema into
+## $dst. opts: codec/compression (default zstd). Returns { dst, files, rows }.
+fn Parquet::merge ($srcs, $dst, %opts) {
+    die "Parquet::merge: srcs must be an arrayref" unless ref($srcs) eq "ARRAY"
+    Parquet::_decode("merge",
+        parquet__merge(to_json({
+            srcs => $srcs, dst => $dst,
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}

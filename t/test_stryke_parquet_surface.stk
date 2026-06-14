@@ -33,4 +33,9 @@ assert_ok exists &Parquet::column_names, "Parquet::column_names exists"
 assert_ok exists &Parquet::column_count, "Parquet::column_count exists"
 assert_ok exists &Parquet::is_empty, "Parquet::is_empty exists"
 
+# ── Parquet.stk write paths ──
+assert_ok exists &Parquet::from_csv, "Parquet::from_csv exists"
+assert_ok exists &Parquet::from_json, "Parquet::from_json exists"
+assert_ok exists &Parquet::merge, "Parquet::merge exists"
+
 test_run

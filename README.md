@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![stryke](https://img.shields.io/badge/stryke-package-cyan.svg)](https://github.com/MenkeTechnologies/strykelang)
 
-### `[PARQUET FILE INSPECTOR FOR STRYKE // SCHEMA + STATS + ROW-GROUPS + HEAD/TAIL + RECOMPRESS]`
+### `[PARQUET TOOLKIT FOR STRYKE // SCHEMA + STATS + ROW-GROUPS + HEAD/TAIL + CSV/JSON IN-OUT + MERGE + RECOMPRESS]`
 
 > *"See into parquet without loading it."*
 
@@ -138,6 +138,9 @@ Parquet::to_json    $path, %opts → @rows
 Parquet::stream     $path, %opts → $count         # callback per row
 Parquet::to_csv     $path, %opts → $csv | $path   # opts: output, columns
 Parquet::compress   $src, $dst, %opts → \%resp    # opts: codec, row_group
+Parquet::from_csv   $src, $dst, %opts → \%resp    # CSV → parquet; opts: header, delimiter, codec
+Parquet::from_json  $src, $dst, %opts → \%resp    # NDJSON → parquet; opts: codec
+Parquet::merge      \@srcs, $dst, %opts → \%resp  # concat same-schema files; opts: codec
 ```
 
 ### Convenience composites
