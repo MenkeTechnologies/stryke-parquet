@@ -849,6 +849,78 @@ fn op_column_chunk_stats(args: Value) -> Result<Value> {
     Ok(json!({"row_groups": groups}))
 }
 
+/// Aggregate the footer's per-column-chunk byte sizes into a file-level
+/// compression report: total compressed/uncompressed bytes, overall ratio,
+/// bytes-per-row, and a per-column rollup (summed across every row group)
+/// sorted by compressed size descending. Reads only the footer — no column
+/// data is decoded. Complements `column_chunk_stats`, which stays per-group.
+fn op_size_report(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let descr = m.file_metadata().schema_descr();
+    // Per-column running totals, keyed by column path and kept in first-seen
+    // order so the rollup is deterministic before the size sort.
+    let mut order: Vec<String> = Vec::new();
+    let mut comp: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut uncomp: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut total_comp: i64 = 0;
+    let mut total_uncomp: i64 = 0;
+    let mut num_rows: i64 = 0;
+    for j in 0..m.num_row_groups() {
+        let rg = m.row_group(j);
+        num_rows += rg.num_rows();
+        for i in 0..rg.num_columns() {
+            let col = rg.column(i);
+            let name = descr.column(i).path().string();
+            if !comp.contains_key(&name) {
+                order.push(name.clone());
+            }
+            *comp.entry(name.clone()).or_insert(0) += col.compressed_size();
+            *uncomp.entry(name).or_insert(0) += col.uncompressed_size();
+            total_comp += col.compressed_size();
+            total_uncomp += col.uncompressed_size();
+        }
+    }
+    let ratio = |u: i64, c: i64| -> Value {
+        if c > 0 {
+            json!(u as f64 / c as f64)
+        } else {
+            Value::Null
+        }
+    };
+    let mut columns: Vec<(String, i64, i64)> = order
+        .into_iter()
+        .map(|n| {
+            let c = comp[&n];
+            let u = uncomp[&n];
+            (n, c, u)
+        })
+        .collect();
+    columns.sort_by(|a, b| b.1.cmp(&a.1));
+    let columns: Vec<Value> = columns
+        .into_iter()
+        .map(|(n, c, u)| {
+            json!({
+                "column": n,
+                "compressed_size": c,
+                "uncompressed_size": u,
+                "compression_ratio": ratio(u, c),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "total_compressed_size": total_comp,
+        "total_uncompressed_size": total_uncomp,
+        "compression_ratio": ratio(total_uncomp, total_comp),
+        "num_rows": num_rows,
+        "bytes_per_row": if num_rows > 0 { json!(total_comp as f64 / num_rows as f64) } else { Value::Null },
+        "columns": columns,
+    }))
+}
+
 /// Read `n` rows starting at absolute row `offset` (default offset 0, n 10).
 /// `head` reads from the start and `tail` from the end; this fills the gap
 /// with an arbitrary window. Honors an optional `columns` projection.
@@ -1084,6 +1156,11 @@ pub extern "C" fn parquet__validate(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__column_chunk_stats(args: *const c_char) -> *const c_char {
     ffi_call(args, op_column_chunk_stats)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__size_report(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_size_report)
 }
 
 #[no_mangle]
@@ -1772,6 +1849,44 @@ mod tests_audit {
         // First row group holds ids 0,1 → min 0, max 1 from chunk stats.
         assert_eq!(c0["min"].as_i64().unwrap(), 0, "first chunk min from stats");
         assert_eq!(c0["max"].as_i64().unwrap(), 1, "first chunk max from stats");
+    }
+
+    #[test]
+    fn op_size_report_aggregates_footer_bytes_across_groups() {
+        let path = unique_audit_path("sizereport.parquet");
+        write_rg_parquet(&path, 5, 2); // single "id" column, 3 row groups
+        let v = op_size_report(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            v["num_rows"].as_i64().unwrap(),
+            5,
+            "rows summed across groups"
+        );
+        let total = v["total_compressed_size"].as_i64().unwrap();
+        assert!(total > 0, "compressed total is a real footer value");
+        assert!(
+            v["total_uncompressed_size"].as_i64().unwrap() > 0,
+            "uncompressed total populated"
+        );
+        // Single column → its rollup equals the file totals.
+        let cols = v["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 1, "one rolled-up column");
+        assert_eq!(cols[0]["column"], json!("id"), "column name preserved");
+        assert_eq!(
+            cols[0]["compressed_size"].as_i64().unwrap(),
+            total,
+            "lone column's compressed bytes equal the file total"
+        );
+        // bytes_per_row = total_compressed / num_rows.
+        let bpr = v["bytes_per_row"].as_f64().unwrap();
+        assert!(
+            (bpr - total as f64 / 5.0).abs() < 1e-9,
+            "bytes_per_row derives from the compressed total"
+        );
+        assert!(
+            v["compression_ratio"].as_f64().unwrap() > 0.0,
+            "ratio computed from non-zero compressed total"
+        );
     }
 
     #[test]

@@ -121,8 +121,9 @@ cdylib is dlopened in-process on first `use Parquet` (via stryke's
 inspection (`version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
 `metadata`), row read (`head`, `tail`, `to_json`, `to_csv`), conversion
 (`from_csv`, `from_json`, `write`, `write_partitioned`, `compress`,
-`merge`), and diagnostics (`validate`, `column_chunk_stats`, `sample`,
-`features`). The authoritative list is `[ffi].exports` in `stryke.toml`.
+`merge`), and diagnostics (`validate`, `column_chunk_stats`, `size_report`,
+`sample`, `features`). The authoritative list is `[ffi].exports` in
+`stryke.toml`.
 
 Stateless package — parquet operations are file transforms; no
 process-level cache.
@@ -156,14 +157,20 @@ Parquet::validate            $path → { ok, rows, row_groups } | { ok:false, st
 Parquet::column_chunk_stats  $path → @{ {row_group, num_rows, columns:[{column, compression,
                                           encodings, compressed_size, uncompressed_size,
                                           num_values, min, max, null_count}]} }
+Parquet::size_report         $path → { total_compressed_size, total_uncompressed_size,
+                                       compression_ratio, num_rows, bytes_per_row,
+                                       columns:[{column, compressed_size, uncompressed_size,
+                                                 compression_ratio}] }   # columns sorted by size desc
 Parquet::sample              $path, %opts → @rows   # opts: offset, n, columns — arbitrary window
 Parquet::features            $path → { has_bloom_filter, has_column_index, has_offset_index,
                                        columns:[{column, bloom_filter, column_index, offset_index}] }
 ```
 
 `validate` reads every row group and reports failure as data (it never
-`die`s on a corrupt file — check `ok`). `column_chunk_stats` and `features`
-read only the footer; `sample` fills the window `head`/`tail` can't express.
+`die`s on a corrupt file — check `ok`). `column_chunk_stats`, `size_report`,
+and `features` read only the footer — `size_report` rolls the per-chunk byte
+sizes up to file and per-column compression totals; `sample` fills the window
+`head`/`tail` can't express.
 
 ### Convenience composites
 

@@ -250,6 +250,16 @@ fn Parquet::column_chunk_stats ($path) {
     @{ $o->{row_groups} }
 }
 
+## File-level compression report aggregated from the footer (no data read):
+## { total_compressed_size, total_uncompressed_size, compression_ratio,
+## num_rows, bytes_per_row, columns => [{ column, compressed_size,
+## uncompressed_size, compression_ratio }] } with columns sorted by compressed
+## size descending.
+fn Parquet::size_report ($path) {
+    die "Parquet::size_report: file `$path` not found" unless -e $path
+    Parquet::_decode("size_report", parquet__size_report(to_json({ path => $path })))
+}
+
 ## Read $opts{n} rows (default 10) starting at absolute row $opts{offset}
 ## (default 0). Fills the window head/tail can't. opts: offset, n, columns.
 fn Parquet::sample ($path, %opts) {

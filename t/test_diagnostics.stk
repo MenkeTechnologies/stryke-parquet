@@ -1,5 +1,5 @@
-## t/test_diagnostics.stk — assertion tests for the parquet diagnostics added
-## in v0.4.0: validate / column_chunk_stats / sample / features.
+## t/test_diagnostics.stk — assertion tests for the parquet diagnostics:
+## validate / column_chunk_stats / size_report / sample / features.
 ##
 ## Uses stryke's native test framework (`assert_*` + `test_run`). Self-
 ## contained — builds a fixed demo parquet via the cdylib's `_mkdemo` export
@@ -44,6 +44,17 @@ val $c0 = $cc[0]->{columns}[0]
 assert_ok defined($c0->{compression}), "column_chunk_stats: compression reported"
 assert_gt $c0->{compressed_size}, 0, "column_chunk_stats: compressed_size is a real value"
 assert_ge scalar(@{ $c0->{encodings} }), 1, "column_chunk_stats: encodings populated"
+
+# ── size_report: footer byte aggregation ─────────────────────────────
+val $sr = Parquet::size_report($path)
+assert_eq $sr->{num_rows}, 5, "size_report: rows summed across groups"
+assert_gt $sr->{total_compressed_size}, 0, "size_report: compressed total is real"
+assert_gt $sr->{total_uncompressed_size}, 0, "size_report: uncompressed total is real"
+assert_eq scalar(@{ $sr->{columns} }), 3, "size_report: one rollup per column"
+assert_gt $sr->{compression_ratio}, 0, "size_report: ratio computed"
+assert_gt $sr->{bytes_per_row}, 0, "size_report: bytes_per_row derived"
+# columns are sorted by compressed size descending.
+assert_ge $sr->{columns}[0]{compressed_size}, $sr->{columns}[1]{compressed_size}, "size_report: columns sorted by size desc"
 
 # ── features: index/filter presence flags ────────────────────────────
 val $f = Parquet::features($path)
