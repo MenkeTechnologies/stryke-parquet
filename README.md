@@ -121,7 +121,7 @@ cdylib is dlopened in-process on first `use Parquet` (via stryke's
 inspection (`version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
 `metadata`), row read (`head`, `tail`, `to_json`, `to_csv`), conversion
 (`from_csv`, `from_json`, `write`, `write_partitioned`, `compress`,
-`merge`), and diagnostics (`validate`, `column_chunk_stats`, `size_report`,
+`merge`), and diagnostics (`validate`, `column_chunk_stats`, `size_report`, `null_summary`,
 `sample`, `features`). The authoritative list is `[ffi].exports` in
 `stryke.toml`.
 
@@ -161,6 +161,8 @@ Parquet::size_report         $path → { total_compressed_size, total_uncompress
                                        compression_ratio, num_rows, bytes_per_row,
                                        columns:[{column, compressed_size, uncompressed_size,
                                                  compression_ratio}] }   # columns sorted by size desc
+Parquet::null_summary        $path → { num_rows, total_nulls,
+                                       columns:[{column, null_count, null_fraction}] }   # null_count null = unknown
 Parquet::sample              $path, %opts → @rows   # opts: offset, n, columns — arbitrary window
 Parquet::features            $path → { has_bloom_filter, has_column_index, has_offset_index,
                                        columns:[{column, bloom_filter, column_index, offset_index}] }

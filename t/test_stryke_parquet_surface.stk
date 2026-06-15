@@ -47,6 +47,7 @@ assert_ok exists &Parquet::write_partitioned, "Parquet::write_partitioned exists
 assert_ok exists &Parquet::validate, "Parquet::validate exists"
 assert_ok exists &Parquet::column_chunk_stats, "Parquet::column_chunk_stats exists"
 assert_ok exists &Parquet::size_report, "Parquet::size_report exists"
+assert_ok exists &Parquet::null_summary, "Parquet::null_summary exists"
 assert_ok exists &Parquet::sample, "Parquet::sample exists"
 assert_ok exists &Parquet::features, "Parquet::features exists"
 test_run

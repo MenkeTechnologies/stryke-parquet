@@ -921,6 +921,68 @@ fn op_size_report(args: Value) -> Result<Value> {
     }))
 }
 
+/// Roll the footer's per-column-chunk null counts up to a file-level data-quality
+/// report: `num_rows`, `total_nulls`, and per-column `{column, null_count,
+/// null_fraction}`. Reads only the footer. A column whose count is `null` had a
+/// chunk with no statistics — its nulls are genuinely unknown, never silently
+/// zero. The data-quality companion to `size_report`.
+fn op_null_summary(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let descr = m.file_metadata().schema_descr();
+    let mut order: Vec<String> = Vec::new();
+    // None = unknown (some chunk for this column carried no statistics).
+    let mut nulls: std::collections::HashMap<String, Option<i64>> =
+        std::collections::HashMap::new();
+    let mut num_rows: i64 = 0;
+    for j in 0..m.num_row_groups() {
+        let rg = m.row_group(j);
+        num_rows += rg.num_rows();
+        for i in 0..rg.num_columns() {
+            let col = rg.column(i);
+            let name = descr.column(i).path().string();
+            if !nulls.contains_key(&name) {
+                order.push(name.clone());
+                nulls.insert(name.clone(), Some(0));
+            }
+            let chunk_nulls = col.statistics().and_then(|s| s.null_count_opt());
+            let entry = nulls.get_mut(&name).unwrap();
+            match (*entry, chunk_nulls) {
+                (Some(acc), Some(c)) => *entry = Some(acc + c as i64),
+                _ => *entry = None,
+            }
+        }
+    }
+    let mut total: Option<i64> = Some(0);
+    let columns: Vec<Value> = order
+        .iter()
+        .map(|n| {
+            let nc = nulls[n];
+            match (total, nc) {
+                (Some(t), Some(c)) => total = Some(t + c),
+                _ => total = None,
+            }
+            let frac = match nc {
+                Some(c) if num_rows > 0 => json!(c as f64 / num_rows as f64),
+                _ => Value::Null,
+            };
+            json!({
+                "column": n,
+                "null_count": nc.map(|c| json!(c)).unwrap_or(Value::Null),
+                "null_fraction": frac,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "num_rows": num_rows,
+        "total_nulls": total.map(|t| json!(t)).unwrap_or(Value::Null),
+        "columns": columns,
+    }))
+}
+
 /// Read `n` rows starting at absolute row `offset` (default offset 0, n 10).
 /// `head` reads from the start and `tail` from the end; this fills the gap
 /// with an arbitrary window. Honors an optional `columns` projection.
@@ -1161,6 +1223,11 @@ pub extern "C" fn parquet__column_chunk_stats(args: *const c_char) -> *const c_c
 #[no_mangle]
 pub extern "C" fn parquet__size_report(args: *const c_char) -> *const c_char {
     ffi_call(args, op_size_report)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__null_summary(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_null_summary)
 }
 
 #[no_mangle]
@@ -1886,6 +1953,54 @@ mod tests_audit {
         assert!(
             v["compression_ratio"].as_f64().unwrap() > 0.0,
             "ratio computed from non-zero compressed total"
+        );
+    }
+
+    #[test]
+    fn op_null_summary_rolls_up_null_counts_from_the_footer() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use parquet::file::properties::EnabledStatistics;
+        // `id` has no nulls; `label` has 2 of 5.
+        let path = unique_audit_path("nullsummary.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let ids = Int64Array::from(vec![1, 2, 3, 4, 5]);
+        let labels = StringArray::from(vec![Some("a"), None, Some("c"), None, Some("e")]);
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids), Arc::new(labels)])
+                .unwrap();
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(EnabledStatistics::Chunk)
+            .build();
+        let file = File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let v = op_null_summary(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(v["num_rows"].as_i64().unwrap(), 5);
+        assert_eq!(
+            v["total_nulls"].as_i64().unwrap(),
+            2,
+            "2 nulls across the file"
+        );
+        let cols = v["columns"].as_array().unwrap();
+        let id = cols.iter().find(|c| c["column"] == "id").unwrap();
+        let label = cols.iter().find(|c| c["column"] == "label").unwrap();
+        assert_eq!(id["null_count"].as_i64().unwrap(), 0, "id has no nulls");
+        assert_eq!(id["null_fraction"].as_f64().unwrap(), 0.0);
+        assert_eq!(
+            label["null_count"].as_i64().unwrap(),
+            2,
+            "label has 2 nulls"
+        );
+        assert!(
+            (label["null_fraction"].as_f64().unwrap() - 0.4).abs() < 1e-9,
+            "null_fraction = 2/5"
         );
     }
 

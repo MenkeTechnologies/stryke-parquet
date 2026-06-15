@@ -56,6 +56,15 @@ assert_gt $sr->{bytes_per_row}, 0, "size_report: bytes_per_row derived"
 # columns are sorted by compressed size descending.
 assert_ge $sr->{columns}[0]{compressed_size}, $sr->{columns}[1]{compressed_size}, "size_report: columns sorted by size desc"
 
+# ── null_summary: per-column null rollup (demo `score` has 1 of 5 null) ──
+val $ns = Parquet::null_summary($path)
+assert_eq $ns->{num_rows}, 5,        "null_summary: rows counted"
+assert_eq $ns->{total_nulls}, 1,     "null_summary: one null in the demo file"
+assert_eq scalar(@{ $ns->{columns} }), 3, "null_summary: one entry per column"
+val $score = (grep { $_->{column} eq "score" } @{ $ns->{columns} })[0]
+assert_eq $score->{null_count}, 1,   "null_summary: score column has 1 null"
+assert_eq $score->{null_fraction}, 0.2, "null_summary: null_fraction = 1/5"
+
 # ── features: index/filter presence flags ────────────────────────────
 val $f = Parquet::features($path)
 assert_ok exists $f->{has_bloom_filter}, "features: bloom flag present"
