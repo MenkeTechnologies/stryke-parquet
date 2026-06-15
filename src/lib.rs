@@ -899,7 +899,7 @@ fn op_size_report(args: Value) -> Result<Value> {
             (n, c, u)
         })
         .collect();
-    columns.sort_by(|a, b| b.1.cmp(&a.1));
+    columns.sort_by_key(|c| std::cmp::Reverse(c.1));
     let columns: Vec<Value> = columns
         .into_iter()
         .map(|(n, c, u)| {
@@ -1760,7 +1760,7 @@ mod tests_audit {
         let ids = Int64Array::from((0..rows as i64).collect::<Vec<_>>());
         let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids)]).unwrap();
         let props = WriterProperties::builder()
-            .set_max_row_group_size(rg_size)
+            .set_max_row_group_row_count(Some(rg_size))
             .set_statistics_enabled(EnabledStatistics::Chunk)
             .build();
         let file = File::create(path).unwrap();
