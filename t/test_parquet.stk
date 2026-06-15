@@ -46,6 +46,14 @@ val @rgs = Parquet::rowgroups($path)
 assert_ge scalar(@rgs), 1, "rowgroups: ≥1 group"
 assert_eq $rgs[0]->{num_rows}, 5, "rowgroups[0]: 5 rows"
 
+# ── row_group_summary: footer-only sizing rollup ────────────────────
+val $rgs = Parquet::row_group_summary($path)
+assert_ge $rgs->{num_row_groups}, 1,   "row_group_summary: at least one group"
+assert_eq $rgs->{total_rows}, 5,       "row_group_summary: total rows"
+assert_ok $rgs->{rows_per_group}{mean} > 0, "row_group_summary: mean rows per group"
+assert_ok $rgs->{compressed_bytes_per_group}{min} <= $rgs->{compressed_bytes_per_group}{max}, "row_group_summary: byte min <= max"
+assert_dies fn { Parquet::row_group_summary("/tmp/nope-$$.parquet") }, "row_group_summary: dies on a missing file"
+
 # ── stats all columns ───────────────────────────────────────────────
 val @stats = Parquet::stats($path)
 assert_eq scalar(@stats), 3, "stats: one row per column"

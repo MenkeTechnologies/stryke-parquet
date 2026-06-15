@@ -122,7 +122,7 @@ inspection (`version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
 `metadata`), row read (`head`, `tail`, `to_json`, `to_csv`), conversion
 (`from_csv`, `from_json`, `write`, `write_partitioned`, `compress`,
 `merge`), and diagnostics (`validate`, `column_chunk_stats`, `size_report`, `null_summary`,
-`encoding_summary`, `sample`, `features`). The authoritative list is `[ffi].exports` in
+`encoding_summary`, `row_group_summary`, `sample`, `features`). The authoritative list is `[ffi].exports` in
 `stryke.toml`.
 
 Stateless package — parquet operations are file transforms; no
@@ -135,6 +135,7 @@ Parquet::inspect    $path → \%info
 Parquet::schema     $path → { fields, num_fields }
 Parquet::count      $path → $n
 Parquet::rowgroups  $path → @rgs
+Parquet::row_group_summary $path → { num_row_groups, total_rows, total_compressed_size, rows_per_group:{min,max,mean}, compressed_bytes_per_group:{min,max,mean} }   # footer-only sizing rollup
 Parquet::stats      $path, %opts → @stats         # opts: column
 Parquet::head       $path, %opts → @rows          # opts: n, columns
 Parquet::tail       $path, %opts → @rows

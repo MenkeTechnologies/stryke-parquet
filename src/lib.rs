@@ -251,6 +251,55 @@ fn op_rowgroups(args: Value) -> Result<Value> {
     Ok(json!({"row_groups": groups}))
 }
 
+/// Footer-only rollup of row-group SIZING: the total row/compressed-byte counts
+/// plus per-row-group `min`/`max`/`mean` of both. Reads only the footer — no
+/// column data is decoded. Surfaces uneven row groups (a wide max-vs-min spread
+/// hurts parallel scan), which `rowgroups` (raw per-group list) and `size_report`
+/// (per-column bytes) do not aggregate. Compressed bytes are summed across each
+/// group's column chunks. opts: path (required). Pure.
+fn op_row_group_summary(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let n = m.num_row_groups();
+    if n == 0 {
+        return Ok(json!({
+            "num_row_groups": 0,
+            "total_rows": 0,
+            "total_compressed_size": 0,
+            "rows_per_group": Value::Null,
+            "compressed_bytes_per_group": Value::Null,
+        }));
+    }
+    let mut row_counts: Vec<i64> = Vec::with_capacity(n);
+    let mut comp_sizes: Vec<i64> = Vec::with_capacity(n);
+    for j in 0..n {
+        let rg = m.row_group(j);
+        row_counts.push(rg.num_rows());
+        comp_sizes.push(
+            (0..rg.num_columns())
+                .map(|i| rg.column(i).compressed_size())
+                .sum(),
+        );
+    }
+    let stat = |v: &[i64]| -> Value {
+        json!({
+            "min": *v.iter().min().unwrap(),
+            "max": *v.iter().max().unwrap(),
+            "mean": v.iter().sum::<i64>() as f64 / v.len() as f64,
+        })
+    };
+    Ok(json!({
+        "num_row_groups": n,
+        "total_rows": row_counts.iter().sum::<i64>(),
+        "total_compressed_size": comp_sizes.iter().sum::<i64>(),
+        "rows_per_group": stat(&row_counts),
+        "compressed_bytes_per_group": stat(&comp_sizes),
+    }))
+}
+
 fn op_stats(args: Value) -> Result<Value> {
     let path = args["path"]
         .as_str()
@@ -1195,6 +1244,11 @@ pub extern "C" fn parquet__rowgroups(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__row_group_summary(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_row_group_summary)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__stats(args: *const c_char) -> *const c_char {
     ffi_call(args, op_stats)
 }
@@ -2104,6 +2158,32 @@ mod tests_audit {
             sorted.dedup();
             assert_eq!(names, sorted, "encodings are sorted and deduped");
         }
+    }
+
+    #[test]
+    fn op_row_group_summary_rolls_up_sizing_from_the_footer() {
+        // 6 rows at row-group size 2 → 3 row groups of 2.
+        let path = unique_audit_path("rgsummary.parquet");
+        write_rg_parquet(&path, 6, 2);
+        let v = op_row_group_summary(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(v["num_row_groups"], json!(3));
+        assert_eq!(v["total_rows"], json!(6));
+        // Evenly split → 2 rows per group, min == max == mean.
+        assert_eq!(v["rows_per_group"]["min"], json!(2));
+        assert_eq!(v["rows_per_group"]["max"], json!(2));
+        assert_eq!(v["rows_per_group"]["mean"], json!(2.0));
+        // Compressed-byte stats are present and consistent (min <= max, total > 0).
+        let cb = &v["compressed_bytes_per_group"];
+        assert!(cb["min"].as_i64().unwrap() <= cb["max"].as_i64().unwrap());
+        assert!(v["total_compressed_size"].as_i64().unwrap() > 0);
+        // An empty (0-row-group) file reports nulls, not a panic.
+        let empty = unique_audit_path("rgempty.parquet");
+        write_rg_parquet(&empty, 0, 1);
+        let ev = op_row_group_summary(json!({ "path": empty.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&empty);
+        assert_eq!(ev["num_row_groups"], json!(0));
+        assert_eq!(ev["rows_per_group"], Value::Null);
     }
 
     #[test]

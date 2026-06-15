@@ -57,6 +57,15 @@ fn Parquet::rowgroups ($path) {
     @{ $o->{row_groups} }
 }
 
+## Footer-only rollup of row-group SIZING: { num_row_groups, total_rows,
+## total_compressed_size, rows_per_group => { min, max, mean },
+## compressed_bytes_per_group => { min, max, mean } }. Surfaces uneven row
+## groups (wide max-vs-min spread hurts parallel scan).
+fn Parquet::row_group_summary ($path) {
+    die "Parquet::row_group_summary: file `$path` not found" unless -e $path
+    Parquet::_decode("row_group_summary", parquet__row_group_summary(to_json({ path => $path })))
+}
+
 ## Per-column footer stats (null count, min, max). Opt `column => name`.
 fn Parquet::stats ($path, %opts) {
     die "Parquet::stats: file `$path` not found" unless -e $path
