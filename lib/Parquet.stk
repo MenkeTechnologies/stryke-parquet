@@ -269,6 +269,15 @@ fn Parquet::null_summary ($path) {
     Parquet::_decode("null_summary", parquet__null_summary(to_json({ path => $path })))
 }
 
+## Per-column physical-encoding rollup from the footer (no data read):
+## { columns => [{ column, encodings, compression }] } where encodings and
+## compression are the sorted, de-duped sets used across every row group.
+## Answers "how is this file encoded" — the encoding companion to size_report.
+fn Parquet::encoding_summary ($path) {
+    die "Parquet::encoding_summary: file `$path` not found" unless -e $path
+    Parquet::_decode("encoding_summary", parquet__encoding_summary(to_json({ path => $path })))
+}
+
 ## Read $opts{n} rows (default 10) starting at absolute row $opts{offset}
 ## (default 0). Fills the window head/tail can't. opts: offset, n, columns.
 fn Parquet::sample ($path, %opts) {

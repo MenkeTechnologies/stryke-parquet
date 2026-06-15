@@ -65,6 +65,14 @@ val $score = (grep { $_->{column} eq "score" } @{ $ns->{columns} })[0]
 assert_eq $score->{null_count}, 1,   "null_summary: score column has 1 null"
 assert_eq $score->{null_fraction}, 0.2, "null_summary: null_fraction = 1/5"
 
+# ── encoding_summary: per-column physical-encoding rollup ──
+val $es = Parquet::encoding_summary($path)
+assert_eq scalar(@{ $es->{columns} }), 3, "encoding_summary: one entry per column"
+val $ec = (grep { $_->{column} eq "score" } @{ $es->{columns} })[0]
+assert_ok scalar(@{ $ec->{encodings} }) >= 1, "encoding_summary: score reports at least one encoding"
+assert_ok scalar(@{ $ec->{compression} }) >= 1, "encoding_summary: score reports a compression codec"
+assert_dies fn { Parquet::encoding_summary("$tmp/missing.parquet") }, "encoding_summary: dies on a missing file"
+
 # ── features: index/filter presence flags ────────────────────────────
 val $f = Parquet::features($path)
 assert_ok exists $f->{has_bloom_filter}, "features: bloom flag present"

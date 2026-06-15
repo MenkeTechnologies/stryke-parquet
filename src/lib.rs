@@ -983,6 +983,55 @@ fn op_null_summary(args: Value) -> Result<Value> {
     }))
 }
 
+/// Roll the footer's per-column-chunk physical-encoding metadata up to a
+/// file-level report: for each column, the distinct `encodings` and
+/// `compression` codecs used across every row group (each a sorted, de-duped
+/// list). Reads only the footer — no column data is decoded. Answers "how is
+/// this file physically encoded" without walking every row group the way
+/// `column_chunk_stats` does. The encoding companion to `size_report`.
+fn op_encoding_summary(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let descr = m.file_metadata().schema_descr();
+    let mut order: Vec<String> = Vec::new();
+    let mut encs: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
+        std::collections::HashMap::new();
+    let mut comps: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
+        std::collections::HashMap::new();
+    for j in 0..m.num_row_groups() {
+        let rg = m.row_group(j);
+        for i in 0..rg.num_columns() {
+            let col = rg.column(i);
+            let name = descr.column(i).path().string();
+            if !encs.contains_key(&name) {
+                order.push(name.clone());
+            }
+            let e = encs.entry(name.clone()).or_default();
+            for enc in col.encodings() {
+                e.insert(format!("{enc:?}"));
+            }
+            comps
+                .entry(name)
+                .or_default()
+                .insert(format!("{:?}", col.compression()));
+        }
+    }
+    let columns: Vec<Value> = order
+        .into_iter()
+        .map(|n| {
+            json!({
+                "column": n,
+                "encodings": encs[&n].iter().cloned().collect::<Vec<_>>(),
+                "compression": comps[&n].iter().cloned().collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(json!({ "columns": columns }))
+}
+
 /// Read `n` rows starting at absolute row `offset` (default offset 0, n 10).
 /// `head` reads from the start and `tail` from the end; this fills the gap
 /// with an arbitrary window. Honors an optional `columns` projection.
@@ -1228,6 +1277,11 @@ pub extern "C" fn parquet__size_report(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__null_summary(args: *const c_char) -> *const c_char {
     ffi_call(args, op_null_summary)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__encoding_summary(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_encoding_summary)
 }
 
 #[no_mangle]
@@ -2002,6 +2056,54 @@ mod tests_audit {
             (label["null_fraction"].as_f64().unwrap() - 0.4).abs() < 1e-9,
             "null_fraction = 2/5"
         );
+    }
+
+    #[test]
+    fn op_encoding_summary_rolls_up_encodings_and_codec_per_column() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use parquet::basic::Compression;
+        // 5 rows at row-group size 2 → 3 row groups; SNAPPY codec on every chunk.
+        let path = unique_audit_path("encsummary.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_max_row_group_row_count(Some(2))
+            .build();
+        let file = File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        let ids = Int64Array::from(vec![1, 2, 3, 4, 5]);
+        let labels = StringArray::from(vec![Some("a"), Some("b"), Some("c"), Some("d"), Some("e")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(ids), Arc::new(labels)]).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let v = op_encoding_summary(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let cols = v["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 2, "two columns");
+        for c in cols {
+            let encs = c["encodings"].as_array().unwrap();
+            assert!(
+                !encs.is_empty(),
+                "every column reports at least one encoding"
+            );
+            // The codec is rolled up across all 3 row groups and deduped to one.
+            assert_eq!(
+                c["compression"],
+                json!(["SNAPPY"]),
+                "single deduped codec across row groups"
+            );
+            // Encodings come from a BTreeSet → sorted and free of duplicates.
+            let names: Vec<&str> = encs.iter().map(|e| e.as_str().unwrap()).collect();
+            let mut sorted = names.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(names, sorted, "encodings are sorted and deduped");
+        }
     }
 
     #[test]
