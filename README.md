@@ -117,9 +117,12 @@ Parquet::compress "events.parquet", "events.zst.parquet",
 Each `Parquet::*` wrapper builds a JSON args dict and calls a sibling
 `parquet__*` symbol resolved out of `libstryke_parquet.{dylib,so}`. The
 cdylib is dlopened in-process on first `use Parquet` (via stryke's
-`pkg::commands::try_load_ffi_for` resolver hook) and exposes 12 entry
-points: `version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
-`head`, `tail`, `to_json`, `to_csv`, `compress`, `mkdemo`.
+`pkg::commands::try_load_ffi_for` resolver hook). Its exports span
+inspection (`version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
+`metadata`), row read (`head`, `tail`, `to_json`, `to_csv`), conversion
+(`from_csv`, `from_json`, `write`, `write_partitioned`, `compress`,
+`merge`), and diagnostics (`validate`, `column_chunk_stats`, `sample`,
+`features`). The authoritative list is `[ffi].exports` in `stryke.toml`.
 
 Stateless package — parquet operations are file transforms; no
 process-level cache.
@@ -145,6 +148,22 @@ Parquet::write_partitioned \@rows, $dst, $column, %opts → \%resp  # Hive col=v
 Parquet::merge      \@srcs, $dst, %opts → \%resp  # concat same-schema files; opts: codec
 Parquet::metadata   $path → \%resp                # writer kv metadata + created_by + version
 ```
+
+### Diagnostics
+
+```stryke
+Parquet::validate            $path → { ok, rows, row_groups } | { ok:false, stage, detail }
+Parquet::column_chunk_stats  $path → @{ {row_group, num_rows, columns:[{column, compression,
+                                          encodings, compressed_size, uncompressed_size,
+                                          num_values, min, max, null_count}]} }
+Parquet::sample              $path, %opts → @rows   # opts: offset, n, columns — arbitrary window
+Parquet::features            $path → { has_bloom_filter, has_column_index, has_offset_index,
+                                       columns:[{column, bloom_filter, column_index, offset_index}] }
+```
+
+`validate` reads every row group and reports failure as data (it never
+`die`s on a corrupt file — check `ok`). `column_chunk_stats` and `features`
+read only the footer; `sample` fills the window `head`/`tail` can't express.
 
 ### Convenience composites
 

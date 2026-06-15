@@ -1,0 +1,48 @@
+#!/usr/bin/env stryke
+# examples/diagnostics.stk — parquet integrity + footer diagnostics (v0.4.0).
+#
+# validate (end-to-end read), column_chunk_stats (per-group footer detail),
+# features (index/filter presence), sample (arbitrary row window).
+#
+# Run:    s examples/diagnostics.stk [file.parquet]
+#         with no arg, generates a demo file.
+
+use Parquet
+
+var ($path) = @ARGV
+val $tmp = "/tmp/stryke-parquet-diag-demo-$$"
+unless (defined $path) {
+    mkdir $tmp unless -d $tmp
+    $path = "$tmp/demo.parquet"
+    Parquet::_mkdemo($path)
+}
+
+val $v = Parquet::validate($path)
+if ($v->{ok}) {
+    p sprintf("validate: ok — %d rows across %d row group(s)", $v->{rows}, $v->{row_groups})
+} else {
+    p sprintf("validate: FAILED at %s — %s", $v->{stage}, $v->{error})
+}
+
+val $f = Parquet::features($path)
+p sprintf("features: bloom=%s column_index=%s offset_index=%s",
+    $f->{has_bloom_filter} ? "yes" : "no",
+    $f->{has_column_index} ? "yes" : "no",
+    $f->{has_offset_index} ? "yes" : "no")
+
+p "column chunks (row group 0):"
+val @cc = Parquet::column_chunk_stats($path)
+for val $c (@{ $cc[0]->{columns} }) {
+    p sprintf("  %-8s %-8s %d→%d bytes  [%s]",
+        $c->{column}, $c->{compression},
+        $c->{uncompressed_size}, $c->{compressed_size},
+        join(",", @{ $c->{encodings} }))
+}
+
+p "sample (rows 1..2):"
+for val $r (Parquet::sample($path, offset => 1, n => 2)) {
+    p "  " . to_json($r)
+}
+
+unlink $path if $path =~ m{/stryke-parquet-diag-demo-} && -e $path
+rmdir $tmp if -d $tmp

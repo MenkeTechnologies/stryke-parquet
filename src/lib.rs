@@ -770,6 +770,180 @@ fn ndjson_to_rows(buf: &[u8]) -> Result<Vec<Value>> {
         .collect()
 }
 
+// ── ops: integrity / footer detail / sampling ───────────────────────────────
+
+/// Full read: decode every row group and report row count, or the first
+/// decode error and the stage it surfaced at. Footer-corrupt files fail at
+/// `footer`; page/data corruption surfaces at `scan`.
+fn op_validate(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let p = Path::new(path);
+    let r = match open_serialized(p) {
+        Ok(r) => r,
+        Err(e) => return Ok(json!({"ok": false, "stage": "footer", "detail": e.to_string()})),
+    };
+    let num_rgs = r.metadata().num_row_groups();
+    let reader = match open_parquet_reader_with_columns(p, 8192, None) {
+        Ok(rd) => rd,
+        Err(e) => return Ok(json!({"ok": false, "stage": "reader", "detail": e.to_string()})),
+    };
+    let mut rows = 0usize;
+    for batch in reader {
+        match batch {
+            Ok(b) => rows += b.num_rows(),
+            Err(e) => {
+                return Ok(json!({
+                    "ok": false, "stage": "scan", "rows_read": rows, "detail": e.to_string()
+                }))
+            }
+        }
+    }
+    Ok(json!({"ok": true, "rows": rows, "row_groups": num_rgs}))
+}
+
+/// Per-row-group, per-column footer detail — compression, encodings, on-disk
+/// sizes and column statistics — without scanning page data. `op_stats` folds
+/// min/max across row groups; this exposes each chunk individually.
+fn op_column_chunk_stats(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let descr = m.file_metadata().schema_descr();
+    let mut groups: Vec<Value> = Vec::new();
+    for j in 0..m.num_row_groups() {
+        let rg = m.row_group(j);
+        let mut chunks: Vec<Value> = Vec::new();
+        for i in 0..rg.num_columns() {
+            let col = rg.column(i);
+            let name = descr.column(i).path().string();
+            let (min, max, null_count) = match col.statistics() {
+                Some(s) => {
+                    let (mn, mx) = stat_minmax(s);
+                    (
+                        mn,
+                        mx,
+                        s.null_count_opt().map(|v| json!(v)).unwrap_or(Value::Null),
+                    )
+                }
+                None => (Value::Null, Value::Null, Value::Null),
+            };
+            let encodings: Vec<String> = col.encodings().map(|e| format!("{e:?}")).collect();
+            chunks.push(json!({
+                "column": name,
+                "compression": format!("{:?}", col.compression()),
+                "encodings": encodings,
+                "compressed_size": col.compressed_size(),
+                "uncompressed_size": col.uncompressed_size(),
+                "num_values": col.num_values(),
+                "min": min,
+                "max": max,
+                "null_count": null_count,
+            }));
+        }
+        groups.push(json!({"row_group": j, "num_rows": rg.num_rows(), "columns": chunks}));
+    }
+    Ok(json!({"row_groups": groups}))
+}
+
+/// Read `n` rows starting at absolute row `offset` (default offset 0, n 10).
+/// `head` reads from the start and `tail` from the end; this fills the gap
+/// with an arbitrary window. Honors an optional `columns` projection.
+fn op_sample(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let n = args["n"].as_u64().unwrap_or(10) as usize;
+    let cols = parse_columns(&args["columns"]);
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, cols.as_deref())?;
+    let mut buf = Vec::<u8>::new();
+    {
+        let mut w = JsonWriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(&mut buf);
+        let mut seen = 0usize;
+        let mut emitted = 0usize;
+        for batch in reader {
+            let mut batch = batch?;
+            let bn = batch.num_rows();
+            let batch_start = seen;
+            seen += bn;
+            if batch_start + bn <= offset {
+                continue;
+            }
+            let local = offset.saturating_sub(batch_start);
+            if local > 0 {
+                batch = batch.slice(local, bn - local);
+            }
+            let remaining = n - emitted;
+            if batch.num_rows() > remaining {
+                batch = batch.slice(0, remaining);
+            }
+            if batch.num_rows() == 0 {
+                if emitted >= n {
+                    break;
+                }
+                continue;
+            }
+            w.write(&batch)?;
+            emitted += batch.num_rows();
+            if emitted >= n {
+                break;
+            }
+        }
+        w.finish()?;
+    }
+    let rows = ndjson_to_rows(&buf)?;
+    Ok(json!({"rows": rows}))
+}
+
+/// Which optional parquet index/filter structures the footer references, per
+/// column and aggregated. Presence is detected from the column-chunk offsets
+/// (bloom filter, column index, offset index) — no page reads.
+fn op_features(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let descr = m.file_metadata().schema_descr();
+    let mut cols: Vec<Value> = Vec::new();
+    let mut any_bloom = false;
+    let mut any_colidx = false;
+    let mut any_offidx = false;
+    for i in 0..descr.num_columns() {
+        let name = descr.column(i).path().string();
+        let mut bloom = false;
+        let mut colidx = false;
+        let mut offidx = false;
+        for j in 0..m.num_row_groups() {
+            let col = m.row_group(j).column(i);
+            bloom |= col.bloom_filter_offset().is_some();
+            colidx |= col.column_index_offset().is_some();
+            offidx |= col.offset_index_offset().is_some();
+        }
+        any_bloom |= bloom;
+        any_colidx |= colidx;
+        any_offidx |= offidx;
+        cols.push(json!({
+            "column": name,
+            "bloom_filter": bloom,
+            "column_index": colidx,
+            "offset_index": offidx,
+        }));
+    }
+    Ok(json!({
+        "has_bloom_filter": any_bloom,
+        "has_column_index": any_colidx,
+        "has_offset_index": any_offidx,
+        "columns": cols,
+    }))
+}
+
 // ── FFI plumbing ────────────────────────────────────────────────────────────
 
 fn ffi_call<F>(args: *const c_char, handler: F) -> *const c_char
@@ -900,6 +1074,26 @@ pub extern "C" fn parquet__metadata(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__mkdemo(args: *const c_char) -> *const c_char {
     ffi_call(args, op_mkdemo)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__validate(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_validate)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__column_chunk_stats(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_column_chunk_stats)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__sample(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_sample)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__features(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_features)
 }
 
 #[cfg(test)]
@@ -1475,5 +1669,133 @@ mod tests_audit {
         let _ = std::fs::remove_file(&csv);
         let _ = std::fs::remove_file(&part);
         let _ = std::fs::remove_file(&out);
+    }
+
+    // ── validate / column_chunk_stats / sample / features ────────────────────
+
+    /// Write `rows` int64 rows into a parquet with row groups capped at
+    /// `rg_size`, chunk statistics on — exercises the multi-row-group paths.
+    fn write_rg_parquet(path: &Path, rows: usize, rg_size: usize) {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use parquet::file::properties::EnabledStatistics;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let ids = Int64Array::from((0..rows as i64).collect::<Vec<_>>());
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids)]).unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_size(rg_size)
+            .set_statistics_enabled(EnabledStatistics::Chunk)
+            .build();
+        let file = File::create(path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    }
+
+    #[test]
+    fn op_validate_reports_ok_with_row_and_group_counts() {
+        let path = unique_audit_path("validate.parquet");
+        write_rg_parquet(&path, 5, 2); // 2 + 2 + 1 → 3 row groups
+        let v = op_validate(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(v["ok"], json!(true), "clean file must validate ok");
+        assert_eq!(v["rows"].as_u64().unwrap(), 5, "validate counts every row");
+        assert_eq!(
+            v["row_groups"].as_u64().unwrap(),
+            3,
+            "rg_size=2 over 5 rows → 3 groups"
+        );
+    }
+
+    #[test]
+    fn op_validate_reports_footer_failure_on_non_parquet() {
+        // A truncated / non-parquet file must fail at the footer stage rather
+        // than panic — op_validate catches the open error.
+        let path = unique_audit_path("notparquet.parquet");
+        std::fs::write(&path, b"this is not a parquet file").unwrap();
+        let v = op_validate(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(v["ok"], json!(false), "garbage file must not validate");
+        assert_eq!(
+            v["stage"],
+            json!("footer"),
+            "failure surfaces at footer read"
+        );
+    }
+
+    #[test]
+    fn op_sample_offset_window_skips_and_caps() {
+        // 5 rows id 0..4, sample offset=1 n=2 → ids 1,2 (skips row 0, stops
+        // after 2). Boundary that head/tail can't express.
+        let path = unique_audit_path("sample.parquet");
+        write_rg_parquet(&path, 5, 2);
+        let v = op_sample(json!({ "path": path.to_str().unwrap(), "offset": 1, "n": 2 })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let rows = v["rows"].as_array().unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![1, 2], "sample(offset=1,n=2) must return ids 1,2");
+    }
+
+    #[test]
+    fn op_sample_offset_past_end_is_empty() {
+        let path = unique_audit_path("sample-end.parquet");
+        write_rg_parquet(&path, 3, 2);
+        let v = op_sample(json!({ "path": path.to_str().unwrap(), "offset": 10, "n": 5 })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            v["rows"].as_array().unwrap().is_empty(),
+            "offset beyond the file must yield no rows, not wrap"
+        );
+    }
+
+    #[test]
+    fn op_column_chunk_stats_exposes_per_group_chunk_detail() {
+        let path = unique_audit_path("chunkstats.parquet");
+        write_rg_parquet(&path, 5, 2); // 3 row groups
+        let v = op_column_chunk_stats(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let groups = v["row_groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 3, "one entry per row group");
+        let c0 = &groups[0]["columns"][0];
+        assert_eq!(c0["column"], json!("id"), "column name surfaced");
+        assert!(
+            c0["compressed_size"].as_i64().unwrap() > 0,
+            "compressed_size must be a real footer value"
+        );
+        assert!(
+            c0["encodings"]
+                .as_array()
+                .map(|e| !e.is_empty())
+                .unwrap_or(false),
+            "encodings list must be populated from the footer"
+        );
+        // First row group holds ids 0,1 → min 0, max 1 from chunk stats.
+        assert_eq!(c0["min"].as_i64().unwrap(), 0, "first chunk min from stats");
+        assert_eq!(c0["max"].as_i64().unwrap(), 1, "first chunk max from stats");
+    }
+
+    #[test]
+    fn op_features_reports_absent_indexes_for_plain_file() {
+        // A vanilla ArrowWriter file has no bloom filter; presence flags must
+        // be reported (here, false) rather than crash on the missing offsets.
+        let path = unique_audit_path("features.parquet");
+        write_rg_parquet(&path, 4, 2);
+        let v = op_features(json!({ "path": path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            v["has_bloom_filter"],
+            json!(false),
+            "default writer emits no bloom filter"
+        );
+        assert!(
+            v["columns"].as_array().unwrap().len() == 1,
+            "one column reported"
+        );
+        let c = &v["columns"][0];
+        assert_eq!(
+            c["bloom_filter"],
+            json!(false),
+            "per-column bloom flag present"
+        );
     }
 }

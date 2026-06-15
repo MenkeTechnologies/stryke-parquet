@@ -228,3 +228,42 @@ fn Parquet::write_partitioned ($rows, $dst, $column, %opts) {
             compression => ($opts{codec} // $opts{compression}),
         })))
 }
+
+# ── integrity / footer detail / sampling ──────────────────────────────
+
+## Full read of $path: decode every row group. Returns { ok, rows, row_groups }
+## on success, or { ok => false, stage, detail } at the failing stage
+## (footer | reader | scan). A failure is reported as data, not a die — the
+## `detail` key (not `error`) carries the message. Verify readability end-to-end.
+fn Parquet::validate ($path) {
+    die "Parquet::validate: file `$path` not found" unless -e $path
+    Parquet::_decode("validate", parquet__validate(to_json({ path => $path })))
+}
+
+## Per-row-group, per-column footer detail (no page scan). Returns a list of
+## { row_group, num_rows, columns => [{ column, compression, encodings,
+## compressed_size, uncompressed_size, num_values, min, max, null_count }] }.
+fn Parquet::column_chunk_stats ($path) {
+    die "Parquet::column_chunk_stats: file `$path` not found" unless -e $path
+    val $o = Parquet::_decode("column_chunk_stats",
+        parquet__column_chunk_stats(to_json({ path => $path })))
+    @{ $o->{row_groups} }
+}
+
+## Read $opts{n} rows (default 10) starting at absolute row $opts{offset}
+## (default 0). Fills the window head/tail can't. opts: offset, n, columns.
+fn Parquet::sample ($path, %opts) {
+    die "Parquet::sample: file `$path` not found" unless -e $path
+    var %req = (path => $path, offset => ($opts{offset} // 0), n => ($opts{n} // 10))
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("sample", parquet__sample(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
+## Optional index/filter structures referenced by the footer. Returns
+## { has_bloom_filter, has_column_index, has_offset_index,
+##   columns => [{ column, bloom_filter, column_index, offset_index }] }.
+fn Parquet::features ($path) {
+    die "Parquet::features: file `$path` not found" unless -e $path
+    Parquet::_decode("features", parquet__features(to_json({ path => $path })))
+}

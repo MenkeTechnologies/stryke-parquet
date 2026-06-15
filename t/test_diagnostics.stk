@@ -1,0 +1,59 @@
+## t/test_diagnostics.stk — assertion tests for the parquet diagnostics added
+## in v0.4.0: validate / column_chunk_stats / sample / features.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`). Self-
+## contained — builds a fixed demo parquet via the cdylib's `_mkdemo` export
+## (5 rows: alice..eve, 3 columns) and probes the footer/scan paths against it.
+## Requires the cdylib loaded (install once with `s pkg install -g .`).
+
+use Parquet
+
+val $tmp = "/tmp/stryke-parquet-diag-$$"
+mkdir $tmp unless -d $tmp
+val $path = "$tmp/demo.parquet"
+Parquet::_mkdemo($path)
+
+# ── validate: clean file reads end-to-end ────────────────────────────
+val $v = Parquet::validate($path)
+assert_ok $v->{ok}, "validate: clean demo file is ok"
+assert_eq $v->{rows}, 5, "validate: counts all 5 rows"
+assert_ge $v->{row_groups}, 1, "validate: reports ≥1 row group"
+
+# ── validate: garbage file fails at footer, no crash ─────────────────
+val $bad = "$tmp/notparquet.parquet"
+spew($bad, "this is not parquet")
+val $vb = Parquet::validate($bad)
+assert_ok !$vb->{ok}, "validate: non-parquet file is not ok"
+assert_eq $vb->{stage}, "footer", "validate: garbage fails at the footer stage"
+
+# ── sample: arbitrary offset window ──────────────────────────────────
+val @s = Parquet::sample($path, offset => 1, n => 2)
+assert_eq scalar(@s), 2, "sample(offset=1,n=2): 2 rows"
+assert_eq $s[0]->{name}, "bob", "sample: offset 1 skips alice, starts at bob"
+assert_eq $s[1]->{name}, "carol", "sample: second row is carol"
+
+# ── sample: offset past the end is empty ─────────────────────────────
+val @se = Parquet::sample($path, offset => 99, n => 5)
+assert_eq scalar(@se), 0, "sample: offset beyond file yields no rows"
+
+# ── column_chunk_stats: per-group footer detail ──────────────────────
+val @cc = Parquet::column_chunk_stats($path)
+assert_ge scalar(@cc), 1, "column_chunk_stats: ≥1 row group"
+assert_eq scalar(@{ $cc[0]->{columns} }), 3, "column_chunk_stats: 3 columns in group 0"
+val $c0 = $cc[0]->{columns}[0]
+assert_ok defined($c0->{compression}), "column_chunk_stats: compression reported"
+assert_gt $c0->{compressed_size}, 0, "column_chunk_stats: compressed_size is a real value"
+assert_ge scalar(@{ $c0->{encodings} }), 1, "column_chunk_stats: encodings populated"
+
+# ── features: index/filter presence flags ────────────────────────────
+val $f = Parquet::features($path)
+assert_ok exists $f->{has_bloom_filter}, "features: bloom flag present"
+assert_eq scalar(@{ $f->{columns} }), 3, "features: one entry per column"
+assert_ok exists $f->{columns}[0]{bloom_filter}, "features: per-column bloom flag present"
+
+# cleanup
+unlink $path if -e $path
+unlink $bad  if -e $bad
+rmdir $tmp   if -d $tmp
+
+test_run

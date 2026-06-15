@@ -136,6 +136,10 @@ make install</pre>
             <tr><td>per-column stats</td><td><code>Parquet::stats "events.parquet", column =&gt; "user_id"</code></td></tr>
             <tr><td>first 20 rows</td><td><code>my @first = Parquet::head "events.parquet", n =&gt; 20</code></td></tr>
             <tr><td>recompress with zstd</td><td><code>Parquet::compress "events.parquet", "events.zst.parquet", codec =&gt; "zstd"</code></td></tr>
+            <tr><td>validate a file end-to-end</td><td><code>my $v = Parquet::validate "events.parquet"   # { ok, rows, row_groups }</code></td></tr>
+            <tr><td>per-row-group column chunk detail</td><td><code>my @rg = Parquet::column_chunk_stats "events.parquet"</code></td></tr>
+            <tr><td>arbitrary row window</td><td><code>my @win = Parquet::sample "events.parquet", offset =&gt; 1000, n =&gt; 20</code></td></tr>
+            <tr><td>index / bloom-filter presence</td><td><code>my $f = Parquet::features "events.parquet"</code></td></tr>
           </tbody>
         </table>
         <p>The full API lives in the <a href="https://github.com/MenkeTechnologies/stryke-parquet#0x04-api-reference">README "API reference" section</a>.</p>
