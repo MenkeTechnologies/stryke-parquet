@@ -106,6 +106,15 @@ assert_eq Parquet::schema($dropped)->{num_fields}, 2, "drop: file has 2 fields (
 assert_dies fn { Parquet::drop($path, $dropped, ["nope"]) },           "drop: dies on an unknown column"
 assert_dies fn { Parquet::drop($path, $dropped, ["id","name","score"]) }, "drop: refuses to drop every column"
 
+# ── rename: relabel columns (the third column-op alongside select/drop) ──
+val $renamed = "$tmp/demo-rename.parquet"
+val $rn = Parquet::rename($path, $renamed, { name => "label", score => "points" })
+assert_eq $rn->{rows}, 5,                                       "rename: all 5 rows preserved"
+assert_eq join(",", @{ $rn->{columns} }), "id,label,points",   "rename: only mapped names change, order kept"
+assert_eq join(",", @{ Parquet::column_names($renamed) }), "id,label,points", "rename: new names land in the file schema"
+assert_dies fn { Parquet::rename($path, $renamed, { nope => "x" }) },  "rename: dies on an unknown column"
+assert_dies fn { Parquet::rename($path, $renamed, { id => "name" }) }, "rename: rejects a name collision"
+
 # cleanup
 unlink $path    if -e $path
 unlink $path2   if -e $path2

@@ -151,6 +151,7 @@ Parquet::write_partitioned \@rows, $dst, $column, %opts → \%resp  # Hive col=v
 Parquet::merge      \@srcs, $dst, %opts → \%resp  # concat same-schema files; opts: codec
 Parquet::select     $path, $dst, \@cols, %opts → \%resp  # project a column subset into a new file (column pruning); unknown column errors
 Parquet::drop       $path, $dst, \@cols, %opts → \%resp  # complement of select: keep all columns but \@cols; unknown column / drop-all errors
+Parquet::rename     $path, $dst, \%map, %opts → \%resp   # relabel columns { old => new }; preserves types/order/rows; unknown column / name-collision errors
 Parquet::metadata   $path → \%resp                # writer kv metadata + created_by + version
 ```
 

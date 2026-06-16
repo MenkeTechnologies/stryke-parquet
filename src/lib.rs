@@ -796,6 +796,77 @@ fn op_drop(args: Value) -> Result<Value> {
     write_projection(path, dst, &keep, &compression)
 }
 
+/// Rename columns in a parquet file — the relabeling companion to `select` (keep)
+/// and `drop` (remove). `rename` is an object `{old: new, …}`; every key must be
+/// an existing column (a typo fails loud). Types, nullability, column order and
+/// row count are all preserved — only the schema field names change, so the data
+/// pages are re-written unchanged under the new names. The resulting names must be
+/// unique (a rename that collides with another column is rejected). opts: path,
+/// dst, rename, optional compression (default zstd). Returns
+/// `{dst, rows, columns, compression}`.
+fn op_rename(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let map = args["rename"]
+        .as_object()
+        .ok_or_else(|| anyhow!("missing rename (an object {{old: new}})"))?;
+    if map.is_empty() {
+        bail!("rename: empty rename map");
+    }
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    let all = column_names_of(path)?;
+    let have: std::collections::HashSet<&String> = all.iter().collect();
+    let mut renames: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (old, new) in map {
+        if !have.contains(old) {
+            bail!("rename: no column `{old}` in `{path}`");
+        }
+        let new = new
+            .as_str()
+            .ok_or_else(|| anyhow!("rename: new name for `{old}` must be a string"))?;
+        renames.insert(old.clone(), new.to_string());
+    }
+    // The output names must stay unique (a rename can't collide with another col).
+    let out_names: Vec<String> = all
+        .iter()
+        .map(|n| renames.get(n).cloned().unwrap_or_else(|| n.clone()))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for n in &out_names {
+        if !seen.insert(n) {
+            bail!("rename: duplicate column name `{n}` in the result");
+        }
+    }
+    let reader = open_parquet_reader(Path::new(path), 8192)?;
+    let in_schema = reader.schema();
+    let fields: Vec<Arc<arrow::datatypes::Field>> = in_schema
+        .fields()
+        .iter()
+        .map(|f| match renames.get(f.name()) {
+            Some(nn) => Arc::new(f.as_ref().clone().with_name(nn)),
+            None => f.clone(),
+        })
+        .collect();
+    let out_schema: SchemaRef = Arc::new(arrow::datatypes::Schema::new(fields));
+    let props = WriterProperties::builder()
+        .set_compression(compression_for(&compression)?)
+        .build();
+    let file = File::create(dst)?;
+    let mut w = ArrowWriter::try_new(file, Arc::clone(&out_schema), Some(props))?;
+    let mut rows = 0;
+    for batch in reader {
+        let b = batch?;
+        rows += b.num_rows();
+        // Same column arrays, re-labeled under the renamed schema.
+        let rb = RecordBatch::try_new(Arc::clone(&out_schema), b.columns().to_vec())?;
+        w.write(&rb)?;
+    }
+    w.close()?;
+    Ok(json!({"dst": dst, "rows": rows, "columns": out_names, "compression": compression}))
+}
+
 fn op_write(args: Value) -> Result<Value> {
     use arrow_json::reader::{infer_json_schema_from_seekable, ReaderBuilder as JsonReaderBuilder};
     use std::io::Cursor;
@@ -1548,6 +1619,11 @@ pub extern "C" fn parquet__drop(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__rename(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_rename)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__write(args: *const c_char) -> *const c_char {
     ffi_call(args, op_write)
 }
@@ -2274,6 +2350,44 @@ mod tests_audit {
         assert!(op_select(json!({
             "path": src.to_str().unwrap(), "dst": out.to_str().unwrap(),
         }))
+        .is_err());
+        let _ = std::fs::remove_file(&csv);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_rename_relabels_columns_preserving_order_and_rows() {
+        let csv = unique_audit_path("rename.csv");
+        std::fs::write(&csv, "id,name,score\n1,a,10\n2,b,20\n3,c,30\n").unwrap();
+        let src = unique_audit_path("rename_src.parquet");
+        op_from_csv(json!({"src": csv.to_str().unwrap(), "dst": src.to_str().unwrap()})).unwrap();
+        let out = unique_audit_path("rename_out.parquet");
+        let r = op_rename(json!({
+            "path": src.to_str().unwrap(),
+            "dst": out.to_str().unwrap(),
+            "rename": {"name": "label", "score": "points"},
+        }))
+        .unwrap();
+        // Only the mapped names change; file order and row count are preserved.
+        assert_eq!(r["columns"], json!(["id", "label", "points"]));
+        assert_eq!(r["rows"], json!(3));
+        assert_eq!(count_parquet_rows(&out), 3);
+        let sch = op_schema(json!({"path": out.to_str().unwrap()})).unwrap();
+        let names: Vec<&str> = sch["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["id", "label", "points"]);
+        // Unknown old column, a collision with an existing column, and an empty
+        // map all fail loud rather than producing a surprising file.
+        assert!(op_rename(json!({"path": src.to_str().unwrap(), "dst": out.to_str().unwrap(), "rename": {"nope": "x"}})).is_err());
+        assert!(op_rename(json!({"path": src.to_str().unwrap(), "dst": out.to_str().unwrap(), "rename": {"id": "name"}})).is_err());
+        assert!(op_rename(
+            json!({"path": src.to_str().unwrap(), "dst": out.to_str().unwrap(), "rename": {}})
+        )
         .is_err());
         let _ = std::fs::remove_file(&csv);
         let _ = std::fs::remove_file(&src);

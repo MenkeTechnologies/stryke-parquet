@@ -245,6 +245,20 @@ fn Parquet::drop ($path, $dst, $cols, %opts) {
         })))
 }
 
+## Rename columns of $path into a new parquet $dst — the relabeling companion to
+## select/drop. $map is a hashref { old => new } where every old name must exist;
+## types, nullability, column order and row count are preserved, and the resulting
+## names must be unique (a collision is rejected). opts: codec/compression
+## (default zstd). Returns { dst, rows, columns, compression }.
+fn Parquet::rename ($path, $dst, $map, %opts) {
+    die "Parquet::rename: map must be a hashref" unless ref($map) eq "HASH"
+    Parquet::_decode("rename",
+        parquet__rename(to_json({
+            path => $path, dst => $dst, rename => $map,
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}
+
 ## Write in-memory $rows (arrayref of hashrefs) to a parquet $dst. Schema is
 ## inferred from the rows. opts: codec/compression (default zstd).
 ## Returns { dst, rows, compression }.
