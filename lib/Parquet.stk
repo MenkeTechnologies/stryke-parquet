@@ -100,6 +100,19 @@ fn Parquet::tail ($path, %opts) {
     @{ $o->{rows} }
 }
 
+## An arbitrary row window as hashrefs — `length` rows starting at `offset`
+## (0-based), the offset-aware companion to head/tail. Omit `length` to slice to
+## the end; an `offset` past the end yields no rows. Pass `columns => [...]` for
+## column projection.
+fn Parquet::slice ($path, %opts) {
+    die "Parquet::slice: file `$path` not found" unless -e $path
+    var %req = (path => $path, offset => ($opts{offset} // 0))
+    $req{length}  = $opts{length}  if defined $opts{length}
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("slice", parquet__slice(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
 ## All rows as hashrefs. Opt `limit`.
 fn Parquet::to_json ($path, %opts) {
     die "Parquet::to_json: file `$path` not found" unless -e $path

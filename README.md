@@ -138,6 +138,7 @@ Parquet::rowgroups  $path → @rgs
 Parquet::row_group_summary $path → { num_row_groups, total_rows, total_compressed_size, rows_per_group:{min,max,mean}, compressed_bytes_per_group:{min,max,mean} }   # footer-only sizing rollup
 Parquet::stats      $path, %opts → @stats         # opts: column
 Parquet::head       $path, %opts → @rows          # opts: n, columns
+Parquet::slice      $path, %opts → @rows          # opts: offset, length (to end if omitted), columns — offset window
 Parquet::tail       $path, %opts → @rows
 Parquet::to_json    $path, %opts → @rows
 Parquet::stream     $path, %opts → $count         # callback per row

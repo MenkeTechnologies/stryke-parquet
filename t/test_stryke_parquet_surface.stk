@@ -26,6 +26,7 @@ assert_ok exists &Parquet::row_group_summary, "Parquet::row_group_summary exists
 assert_ok exists &Parquet::stats, "Parquet::stats exists"
 assert_ok exists &Parquet::head, "Parquet::head exists"
 assert_ok exists &Parquet::tail, "Parquet::tail exists"
+assert_ok exists &Parquet::slice, "Parquet::slice exists"
 assert_ok exists &Parquet::to_json, "Parquet::to_json exists"
 assert_ok exists &Parquet::stream, "Parquet::stream exists"
 assert_ok exists &Parquet::to_csv, "Parquet::to_csv exists"

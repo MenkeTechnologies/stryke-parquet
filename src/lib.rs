@@ -473,6 +473,65 @@ fn op_tail(args: Value) -> Result<Value> {
     Ok(json!({"rows": ndjson_to_rows(&buf)?}))
 }
 
+/// Return an arbitrary row window — `length` rows starting at `offset` (0-based)
+/// — the offset-aware companion to `head`/`tail`. `length` (or `n`) is optional;
+/// when omitted the window runs to the end of the file. An `offset` past the end
+/// yields no rows. Supports the same `columns` projection as `head`. Returns
+/// `{rows}`.
+fn op_slice(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let length = args["length"]
+        .as_u64()
+        .or_else(|| args["n"].as_u64())
+        .map(|v| v as usize);
+    let cols = parse_columns(&args["columns"]);
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, cols.as_deref())?;
+    let mut buf = Vec::<u8>::new();
+    {
+        let mut w = JsonWriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(&mut buf);
+        let mut scanned = 0usize; // original rows consumed before the current batch
+        let mut emitted = 0usize;
+        for batch in reader {
+            let batch = batch?;
+            let n_rows = batch.num_rows();
+            let batch_start = scanned;
+            scanned += n_rows;
+            // Whole batch lies before the window start.
+            if batch_start + n_rows <= offset {
+                continue;
+            }
+            // Trim the prefix that falls before `offset`.
+            let local_off = offset.saturating_sub(batch_start);
+            let mut b = if local_off > 0 {
+                batch.slice(local_off, n_rows - local_off)
+            } else {
+                batch
+            };
+            if let Some(len) = length {
+                if emitted >= len {
+                    break;
+                }
+                let remaining = len - emitted;
+                if b.num_rows() > remaining {
+                    b = b.slice(0, remaining);
+                }
+            }
+            w.write(&b)?;
+            emitted += b.num_rows();
+            if length.is_some_and(|len| emitted >= len) {
+                break;
+            }
+        }
+        w.finish()?;
+    }
+    Ok(json!({"rows": ndjson_to_rows(&buf)?}))
+}
+
 fn op_to_json(args: Value) -> Result<Value> {
     let path = args["path"]
         .as_str()
@@ -1444,6 +1503,11 @@ pub extern "C" fn parquet__tail(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__slice(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_slice)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__to_json(args: *const c_char) -> *const c_char {
     ffi_call(args, op_to_json)
 }
@@ -1791,6 +1855,48 @@ mod tests {
         );
         // Last row of the file should be the last value written: 10.
         assert_eq!(rows[rows.len() - 1]["v"], json!(10));
+    }
+
+    #[test]
+    fn op_slice_returns_an_offset_window() {
+        // Write ids 1..=5 in one file.
+        let path = unique_tmp_path("slice.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let ids: Int64Array = vec![1_i64, 2, 3, 4, 5].into();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids)]).unwrap();
+        {
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let ids_of = |v: &Value| -> Vec<i64> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect()
+        };
+        // offset 1, length 2 → rows 2,3.
+        let w =
+            op_slice(json!({"path": path.to_str().unwrap(), "offset": 1, "length": 2})).unwrap();
+        assert_eq!(ids_of(&w), vec![2, 3]);
+        // offset only → to the end.
+        let e = op_slice(json!({"path": path.to_str().unwrap(), "offset": 3})).unwrap();
+        assert_eq!(ids_of(&e), vec![4, 5]);
+        // length exceeding the remainder is capped.
+        let c =
+            op_slice(json!({"path": path.to_str().unwrap(), "offset": 4, "length": 99})).unwrap();
+        assert_eq!(ids_of(&c), vec![5]);
+        // offset past the end → empty.
+        let p =
+            op_slice(json!({"path": path.to_str().unwrap(), "offset": 10, "length": 3})).unwrap();
+        assert_eq!(p["rows"].as_array().unwrap().len(), 0);
+        // offset 0 with no length is the whole file.
+        let all = op_slice(json!({"path": path.to_str().unwrap()})).unwrap();
+        assert_eq!(ids_of(&all), vec![1, 2, 3, 4, 5]);
+        let _ = std::fs::remove_file(&path);
     }
 }
 
