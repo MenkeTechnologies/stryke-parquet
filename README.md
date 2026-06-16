@@ -148,7 +148,8 @@ Parquet::from_csv   $src, $dst, %opts → \%resp    # CSV → parquet; opts: hea
 Parquet::from_json  $src, $dst, %opts → \%resp    # NDJSON → parquet; opts: codec
 Parquet::write      \@rows, $dst, %opts → \%resp  # in-memory rows (hashrefs) → parquet; opts: codec
 Parquet::write_partitioned \@rows, $dst, $column, %opts → \%resp  # Hive col=val/ dirs; opts: codec
-Parquet::merge      \@srcs, $dst, %opts → \%resp  # concat same-schema files; opts: codec
+Parquet::merge      \@srcs, $dst, %opts → \%resp  # concat same-schema files (vertical); opts: codec
+Parquet::hstack     $path, $other, $dst, %opts → \%resp  # horizontal: append $other's columns at matching row count; column-name collision errors
 Parquet::select     $path, $dst, \@cols, %opts → \%resp  # project a column subset into a new file (column pruning); unknown column errors
 Parquet::drop       $path, $dst, \@cols, %opts → \%resp  # complement of select: keep all columns but \@cols; unknown column / drop-all errors
 Parquet::rename     $path, $dst, \%map, %opts → \%resp   # relabel columns { old => new }; preserves types/order/rows; unknown column / name-collision errors

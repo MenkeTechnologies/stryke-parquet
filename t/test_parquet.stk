@@ -115,6 +115,17 @@ assert_eq join(",", @{ Parquet::column_names($renamed) }), "id,label,points", "r
 assert_dies fn { Parquet::rename($path, $renamed, { nope => "x" }) },  "rename: dies on an unknown column"
 assert_dies fn { Parquet::rename($path, $renamed, { id => "name" }) }, "rename: rejects a name collision"
 
+# ── hstack: column-wise counterpart of merge ────────────────────────
+val $hs_l = "$tmp/demo-hs-l.parquet"
+val $hs_r = "$tmp/demo-hs-r.parquet"
+Parquet::select($path, $hs_l, ["id"])
+Parquet::select($path, $hs_r, ["name"])
+val $hs = Parquet::hstack($hs_l, $hs_r, "$tmp/demo-hs.parquet")
+assert_eq $hs->{rows}, 5,                              "hstack: row count preserved"
+assert_eq join(",", @{ $hs->{columns} }), "id,name",  "hstack: src columns then other columns"
+assert_eq Parquet::schema("$tmp/demo-hs.parquet")->{num_fields}, 2, "hstack: combined file has both columns"
+assert_dies fn { Parquet::hstack($hs_l, $hs_l, "$tmp/demo-hs-dup.parquet") }, "hstack: rejects a duplicate column name"
+
 # cleanup
 unlink $path    if -e $path
 unlink $path2   if -e $path2

@@ -714,6 +714,64 @@ fn op_merge(args: Value) -> Result<Value> {
     Ok(json!({"dst": dst, "files": srcs.len(), "rows": rows, "compression": compression}))
 }
 
+/// Horizontally stack a second parquet file's columns onto `path` — the
+/// column-wise counterpart of `merge` (which appends rows). Both files must have
+/// the same row count; the output is `path`'s columns followed by `other`'s, and a
+/// column-name collision is rejected. opts: `path` (or `src`), `other` (required),
+/// `dst`, optional compression (default zstd). Returns
+/// `{dst, rows, columns, compression}`.
+fn op_hstack(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .or_else(|| args["src"].as_str())
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let other = args["other"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing other (the second parquet)"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    let lreader = open_parquet_reader(Path::new(path), 8192)?;
+    let lschema = lreader.schema();
+    let lbatches: Vec<RecordBatch> = lreader.collect::<std::result::Result<_, _>>()?;
+    let left = arrow::compute::concat_batches(&lschema, &lbatches)?;
+    let rreader = open_parquet_reader(Path::new(other), 8192)?;
+    let rschema = rreader.schema();
+    let rbatches: Vec<RecordBatch> = rreader.collect::<std::result::Result<_, _>>()?;
+    let right = arrow::compute::concat_batches(&rschema, &rbatches)?;
+    if left.num_rows() != right.num_rows() {
+        return Err(anyhow!(
+            "hstack: row counts differ ({} vs {})",
+            left.num_rows(),
+            right.num_rows()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut fields: Vec<Arc<arrow::datatypes::Field>> = Vec::new();
+    for f in lschema.fields().iter().chain(rschema.fields().iter()) {
+        if !seen.insert(f.name().clone()) {
+            return Err(anyhow!("hstack: duplicate column name `{}`", f.name()));
+        }
+        fields.push(f.clone());
+    }
+    let out_schema: SchemaRef = Arc::new(arrow::datatypes::Schema::new(fields));
+    let mut cols = left.columns().to_vec();
+    cols.extend(right.columns().iter().cloned());
+    let out = RecordBatch::try_new(Arc::clone(&out_schema), cols)?;
+    let kept: Vec<String> = out_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    let props = WriterProperties::builder()
+        .set_compression(compression_for(&compression)?)
+        .build();
+    let file = File::create(dst)?;
+    let mut w = ArrowWriter::try_new(file, Arc::clone(&out_schema), Some(props))?;
+    w.write(&out)?;
+    w.close()?;
+    Ok(json!({"dst": dst, "rows": out.num_rows(), "columns": kept, "compression": compression}))
+}
+
 /// Project a subset of columns into a new parquet file (column pruning) — the
 /// write-to-file companion to `head`/`tail`'s preview projection. `columns` is a
 /// non-empty array of names; every name must exist (a `ProjectionMask` silently
@@ -1609,6 +1667,11 @@ pub extern "C" fn parquet__merge(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__hstack(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_hstack)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__select(args: *const c_char) -> *const c_char {
     ffi_call(args, op_select)
 }
@@ -2303,6 +2366,57 @@ mod tests_audit {
         let _ = std::fs::remove_file(&csv);
         let _ = std::fs::remove_file(&part);
         let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_hstack_appends_columns_at_matching_row_count() {
+        let lcsv = unique_audit_path("hsl.csv");
+        std::fs::write(&lcsv, "id\n1\n2\n3\n").unwrap();
+        let rcsv = unique_audit_path("hsr.csv");
+        std::fs::write(&rcsv, "name\na\nb\nc\n").unwrap();
+        let left = unique_audit_path("hsl.parquet");
+        let right = unique_audit_path("hsr.parquet");
+        op_from_csv(json!({"src": lcsv.to_str().unwrap(), "dst": left.to_str().unwrap()})).unwrap();
+        op_from_csv(json!({"src": rcsv.to_str().unwrap(), "dst": right.to_str().unwrap()}))
+            .unwrap();
+        let out = unique_audit_path("hstack.parquet");
+        let r = op_hstack(json!({
+            "path": left.to_str().unwrap(),
+            "other": right.to_str().unwrap(),
+            "dst": out.to_str().unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(r["rows"], json!(3));
+        assert_eq!(
+            r["columns"],
+            json!(["id", "name"]),
+            "src columns then other columns"
+        );
+        assert_eq!(count_parquet_rows(&out), 3);
+        let sch = op_schema(json!({"path": out.to_str().unwrap()})).unwrap();
+        let names: Vec<&str> = sch["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["id", "name"]);
+        // A mismatched row count, a duplicate column name, and a missing `other`
+        // all fail loud rather than producing a misaligned or ambiguous file.
+        let scsv = unique_audit_path("hss.csv");
+        std::fs::write(&scsv, "name\nx\n").unwrap();
+        let short = unique_audit_path("hss.parquet");
+        op_from_csv(json!({"src": scsv.to_str().unwrap(), "dst": short.to_str().unwrap()}))
+            .unwrap();
+        assert!(op_hstack(json!({"path": left.to_str().unwrap(), "other": short.to_str().unwrap(), "dst": out.to_str().unwrap()})).is_err());
+        assert!(op_hstack(json!({"path": left.to_str().unwrap(), "other": left.to_str().unwrap(), "dst": out.to_str().unwrap()})).is_err());
+        assert!(
+            op_hstack(json!({"path": left.to_str().unwrap(), "dst": out.to_str().unwrap()}))
+                .is_err()
+        );
+        for p in [lcsv, rcsv, left, right, scsv, short, out] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]
