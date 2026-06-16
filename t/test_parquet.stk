@@ -59,6 +59,16 @@ val @gp = Parquet::gather($path, [4], columns => ["name"])
 assert_eq $gp[0]->{name}, "eve",    "gather: honors column projection"
 assert_dies fn { Parquet::gather($path, [0, 5]) }, "gather: index 5 out of range for 5 rows dies"
 
+# ── value_counts: frequency per distinct value ──────────────────────
+val $vcsrc = "$tmp/vc.ndjson"
+spurt($vcsrc, qq({"c":"red"}\n{"c":"blue"}\n{"c":"red"}\n{"c":"green"}\n{"c":"blue"}\n{"c":"red"}\n))
+val $vcpq = "$tmp/vc.parquet"
+Parquet::from_json($vcsrc, $vcpq)
+val @vc = Parquet::value_counts($vcpq, "c")
+assert_eq scalar(@vc), 3,                            "value_counts: 3 distinct values"
+assert_eq join(",", map { $_->{value} } @vc), "red,blue,green", "value_counts: distinct values sorted by count desc"
+assert_eq join(",", map { $_->{count} } @vc), "3,2,1",          "value_counts: frequency of each value"
+
 # ── slice: arbitrary offset window ──────────────────────────────────
 val @win = Parquet::slice($path, offset => 1, length => 2)
 assert_eq scalar(@win), 2, "slice(1,2): 2 rows"

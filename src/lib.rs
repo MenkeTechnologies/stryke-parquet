@@ -548,6 +548,59 @@ fn op_gather(args: Value) -> Result<Value> {
     Ok(json!({ "rows": out }))
 }
 
+/// Frequency of each distinct value in a `column` — pandas/polars `value_counts`,
+/// mirroring `Arrow::value_counts`. Projects just that column, tallies each
+/// value (nulls form their own group), and returns one `{value, count}` row per
+/// distinct value sorted by count descending then value ascending. opts: `path`,
+/// `column`. Returns `{rows: [{value, count}], distinct}`.
+fn op_value_counts(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?;
+    let projection = vec![column.to_string()];
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, Some(&projection))?;
+    let mut buf = Vec::<u8>::new();
+    {
+        let mut w = JsonWriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(&mut buf);
+        for batch in reader {
+            w.write(&batch?)?;
+        }
+        w.finish()?;
+    }
+    let all = ndjson_to_rows(&buf)?;
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: std::collections::HashMap<String, (Value, u64)> =
+        std::collections::HashMap::new();
+    for row in &all {
+        let val = row.get(column).cloned().unwrap_or(Value::Null);
+        let key = val.to_string();
+        match counts.get_mut(&key) {
+            Some(entry) => entry.1 += 1,
+            None => {
+                order.push(key.clone());
+                counts.insert(key, (val, 1));
+            }
+        }
+    }
+    let distinct = order.len();
+    let mut pairs: Vec<(Value, u64)> = order.iter().map(|k| counts[k].clone()).collect();
+    // Count descending, then value's JSON representation ascending — deterministic.
+    pairs.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+    });
+    let rows: Vec<Value> = pairs
+        .into_iter()
+        .map(|(v, c)| json!({ "value": v, "count": c }))
+        .collect();
+    Ok(json!({ "rows": rows, "distinct": distinct }))
+}
+
 /// Return an arbitrary row window — `length` rows starting at `offset` (0-based)
 /// — the offset-aware companion to `head`/`tail`. `length` (or `n`) is optional;
 /// when omitted the window runs to the end of the file. An `offset` past the end
@@ -1717,6 +1770,11 @@ pub extern "C" fn parquet__gather(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__value_counts(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_value_counts)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__slice(args: *const c_char) -> *const c_char {
     ffi_call(args, op_slice)
 }
@@ -2202,6 +2260,49 @@ mod tests {
             "indices": [0, 5],
         }));
         assert!(err.is_err(), "index 5 is out of range for 5 rows");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn op_value_counts_tallies_a_column_sorted_by_frequency() {
+        // color: red×3, blue×2, green×1.
+        let path = unique_tmp_path("vcounts.parquet");
+        let schema = ArcAlias::new(Schema::new(vec![Field::new(
+            "color",
+            DataType::Utf8,
+            false,
+        )]));
+        let colors =
+            arrow::array::StringArray::from(vec!["red", "blue", "red", "green", "blue", "red"]);
+        let batch =
+            RecordBatch::try_new(ArcAlias::clone(&schema), vec![ArcAlias::new(colors)]).unwrap();
+        {
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let r = op_value_counts(json!({
+            "path": path.to_str().unwrap(),
+            "column": "color",
+        }))
+        .unwrap();
+        assert_eq!(r["distinct"].as_u64().unwrap(), 3);
+        let rows = r["rows"].as_array().unwrap();
+        let pairs: Vec<(&str, u64)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["value"].as_str().unwrap(),
+                    row["count"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("red", 3), ("blue", 2), ("green", 1)],
+            "sorted by count descending"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -142,6 +142,7 @@ Parquet::slice      $path, %opts → @rows          # opts: offset, length (to e
 Parquet::tail       $path, %opts → @rows
 Parquet::reverse    $path, %opts → @rows          # every row in reverse file order (newest-first); opts: columns
 Parquet::gather     $path, \@indices, %opts → @rows  # rows by explicit 0-based index list (arbitrary order, repeats OK, out-of-range dies); opts: columns
+Parquet::value_counts $path, $column → @rows         # { value, count } per distinct value in $column (pandas/polars value_counts); sorted by count desc then value asc
 Parquet::to_json    $path, %opts → @rows
 Parquet::stream     $path, %opts → $count         # callback per row
 Parquet::to_csv     $path, %opts → $csv | $path   # opts: output, columns

@@ -124,6 +124,16 @@ fn Parquet::gather ($path, $indices, %opts) {
     @{ $o->{rows} }
 }
 
+## Frequency of each distinct value in $column as { value, count } hashrefs
+## (pandas/polars value_counts; mirrors Arrow::value_counts). One entry per
+## distinct value (nulls form their own group), sorted by count descending then
+## value ascending. Returns the list of hashrefs.
+fn Parquet::value_counts ($path, $column) {
+    die "Parquet::value_counts: file `$path` not found" unless -e $path
+    val $o = Parquet::_decode("value_counts", parquet__value_counts(to_json({ path => $path, column => $column })))
+    @{ $o->{rows} }
+}
+
 ## An arbitrary row window as hashrefs — `length` rows starting at `offset`
 ## (0-based), the offset-aware companion to head/tail. Omit `length` to slice to
 ## the end; an `offset` past the end yields no rows. Pass `columns => [...]` for
