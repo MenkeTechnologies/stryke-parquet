@@ -662,32 +662,16 @@ fn op_merge(args: Value) -> Result<Value> {
 /// validate up front). Output keeps the file's column order, not the requested
 /// order, and the row count is preserved. opts: path, dst, columns, optional
 /// compression (default zstd). Pure transform.
-fn op_select(args: Value) -> Result<Value> {
-    let path = args["path"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing path"))?;
-    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
-    let cols = parse_columns(&args["columns"])
-        .ok_or_else(|| anyhow!("missing columns (a non-empty array of names)"))?;
-    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
-    // Validate every requested column exists; ProjectionMask ignores unknowns.
-    let probe = open_parquet_reader(Path::new(path), 1)?;
-    let have: std::collections::HashSet<String> = probe
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    for c in &cols {
-        if !have.contains(c) {
-            bail!("select: no column `{c}` in `{path}`");
-        }
-    }
-    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, Some(&cols))?;
+/// Read `path`, keep only `keep` columns (projected at the parquet level), and
+/// write the result to `dst` with `compression`. Shared by `op_select` (keep
+/// the named columns) and `op_drop` (keep all but the named columns). The
+/// reader emits columns in file-schema order regardless of `keep`'s order.
+fn write_projection(path: &str, dst: &str, keep: &[String], compression: &str) -> Result<Value> {
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, Some(keep))?;
     let schema = reader.schema();
     let kept: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
     let props = WriterProperties::builder()
-        .set_compression(compression_for(&compression)?)
+        .set_compression(compression_for(compression)?)
         .build();
     let file = File::create(dst)?;
     let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
@@ -699,6 +683,58 @@ fn op_select(args: Value) -> Result<Value> {
     }
     w.close()?;
     Ok(json!({"dst": dst, "rows": rows, "columns": kept, "compression": compression}))
+}
+
+/// Column names of a parquet file in schema order.
+fn column_names_of(path: &str) -> Result<Vec<String>> {
+    let probe = open_parquet_reader(Path::new(path), 1)?;
+    Ok(probe
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect())
+}
+
+fn op_select(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let cols = parse_columns(&args["columns"])
+        .ok_or_else(|| anyhow!("missing columns (a non-empty array of names)"))?;
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    // Validate every requested column exists; ProjectionMask ignores unknowns.
+    let have: std::collections::HashSet<String> = column_names_of(path)?.into_iter().collect();
+    for c in &cols {
+        if !have.contains(c) {
+            bail!("select: no column `{c}` in `{path}`");
+        }
+    }
+    write_projection(path, dst, &cols, &compression)
+}
+
+fn op_drop(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let drop = parse_columns(&args["columns"])
+        .ok_or_else(|| anyhow!("missing columns (a non-empty array of names to drop)"))?;
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    let all = column_names_of(path)?;
+    let drop_set: std::collections::HashSet<&String> = drop.iter().collect();
+    // Validate every dropped column exists so a typo fails loud, not silent.
+    for c in &drop {
+        if !all.contains(c) {
+            bail!("drop: no column `{c}` in `{path}`");
+        }
+    }
+    let keep: Vec<String> = all.into_iter().filter(|c| !drop_set.contains(c)).collect();
+    if keep.is_empty() {
+        bail!("drop: refusing to drop every column of `{path}`");
+    }
+    write_projection(path, dst, &keep, &compression)
 }
 
 fn op_write(args: Value) -> Result<Value> {
@@ -1443,6 +1479,11 @@ pub extern "C" fn parquet__select(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__drop(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_drop)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__write(args: *const c_char) -> *const c_char {
     ffi_call(args, op_write)
 }
@@ -2126,6 +2167,49 @@ mod tests_audit {
         // Missing/empty columns errors.
         assert!(op_select(json!({
             "path": src.to_str().unwrap(), "dst": out.to_str().unwrap(),
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(&csv);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_drop_keeps_every_column_except_the_named_ones() {
+        let csv = unique_audit_path("drop.csv");
+        std::fs::write(&csv, "id,name,score\n1,a,10\n2,b,20\n3,c,30\n").unwrap();
+        let src = unique_audit_path("drop_src.parquet");
+        op_from_csv(json!({
+            "src": csv.to_str().unwrap(),
+            "dst": src.to_str().unwrap(),
+        }))
+        .unwrap();
+        let out = unique_audit_path("drop_out.parquet");
+        let r = op_drop(json!({
+            "path": src.to_str().unwrap(),
+            "dst": out.to_str().unwrap(),
+            "columns": ["name"],
+        }))
+        .unwrap();
+        // Complement of select: every row, every column but `name`, file order.
+        assert_eq!(r["rows"], json!(3), "all rows preserved");
+        assert_eq!(
+            r["columns"],
+            json!(["id", "score"]),
+            "name dropped, rest in file order"
+        );
+        let sch = op_schema(json!({"path": out.to_str().unwrap()})).unwrap();
+        assert_eq!(sch["num_fields"], json!(2), "one column removed");
+        // Dropping an unknown column errors rather than silently no-op.
+        assert!(op_drop(json!({
+            "path": src.to_str().unwrap(), "dst": out.to_str().unwrap(),
+            "columns": ["nope"],
+        }))
+        .is_err());
+        // Dropping every column is refused — an empty-schema parquet is useless.
+        assert!(op_drop(json!({
+            "path": src.to_str().unwrap(), "dst": out.to_str().unwrap(),
+            "columns": ["id", "name", "score"],
         }))
         .is_err());
         let _ = std::fs::remove_file(&csv);

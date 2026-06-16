@@ -84,10 +84,20 @@ assert_eq join(",", @{ $sel->{columns} }), "id,score", "select: only id+score ke
 assert_eq Parquet::schema($proj)->{num_fields}, 2, "select: pruned file has 2 fields (name dropped)"
 assert_dies fn { Parquet::select($path, $proj, ["id", "nope"]) }, "select: dies on an unknown column"
 
+# ── drop: complement of select (keep all but the named columns) ─────
+val $dropped = "$tmp/demo-drop.parquet"
+val $dr = Parquet::drop($path, $dropped, ["name"])
+assert_eq $dr->{rows}, 5,                            "drop: all 5 rows preserved"
+assert_eq join(",", @{ $dr->{columns} }), "id,score", "drop: name removed, rest in file order"
+assert_eq Parquet::schema($dropped)->{num_fields}, 2, "drop: file has 2 fields (name dropped)"
+assert_dies fn { Parquet::drop($path, $dropped, ["nope"]) },           "drop: dies on an unknown column"
+assert_dies fn { Parquet::drop($path, $dropped, ["id","name","score"]) }, "drop: refuses to drop every column"
+
 # cleanup
-unlink $path  if -e $path
-unlink $path2 if -e $path2
-unlink $proj  if -e $proj
+unlink $path    if -e $path
+unlink $path2   if -e $path2
+unlink $proj    if -e $proj
+unlink $dropped if -e $dropped
 rmdir $tmp   if -d $tmp
 
 test_run
