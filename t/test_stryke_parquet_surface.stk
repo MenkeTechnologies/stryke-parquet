@@ -51,6 +51,7 @@ assert_ok exists &Parquet::size_report, "Parquet::size_report exists"
 assert_ok exists &Parquet::null_summary, "Parquet::null_summary exists"
 assert_ok exists &Parquet::encoding_summary, "Parquet::encoding_summary exists"
 assert_ok exists &Parquet::bloom_filter_summary, "Parquet::bloom_filter_summary exists"
+assert_ok exists &Parquet::sorting_columns_summary, "Parquet::sorting_columns_summary exists"
 assert_ok exists &Parquet::sample, "Parquet::sample exists"
 assert_ok exists &Parquet::features, "Parquet::features exists"
 test_run

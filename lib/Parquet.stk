@@ -296,6 +296,14 @@ fn Parquet::bloom_filter_summary ($path) {
     Parquet::_decode("bloom_filter_summary", parquet__bloom_filter_summary(to_json({ path => $path })))
 }
 
+## The declared sort order of each row group (footer-only). Returns { row_groups
+## => [{ row_group, sorting_columns => [{ column, column_idx, descending,
+## nulls_first }] }], has_sorting_columns }. Most files leave this unset.
+fn Parquet::sorting_columns_summary ($path) {
+    die "Parquet::sorting_columns_summary: file `$path` not found" unless -e $path
+    Parquet::_decode("sorting_columns_summary", parquet__sorting_columns_summary(to_json({ path => $path })))
+}
+
 ## Read $opts{n} rows (default 10) starting at absolute row $opts{offset}
 ## (default 0). Fills the window head/tail can't. opts: offset, n, columns.
 fn Parquet::sample ($path, %opts) {

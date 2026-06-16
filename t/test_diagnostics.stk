@@ -81,6 +81,13 @@ assert_eq $bf->{columns_with_bloom_filter}, 0, "bloom_filter_summary: demo file 
 assert_eq $bf->{columns}[0]{has_bloom_filter}, 0, "bloom_filter_summary: absence reported per column"
 assert_dies fn { Parquet::bloom_filter_summary("$tmp/missing.parquet") }, "bloom_filter_summary: dies on a missing file"
 
+# ── sorting_columns_summary: declared sort order (footer-only) ──
+val $sc = Parquet::sorting_columns_summary($path)
+assert_eq scalar(@{ $sc->{row_groups} }), 1, "sorting_columns_summary: one entry per row group"
+assert_eq $sc->{has_sorting_columns}, 0, "sorting_columns_summary: demo file declares no sort order"
+assert_eq scalar(@{ $sc->{row_groups}[0]{sorting_columns} }), 0, "sorting_columns_summary: empty when unset"
+assert_dies fn { Parquet::sorting_columns_summary("$tmp/missing.parquet") }, "sorting_columns_summary: dies on a missing file"
+
 # ── features: index/filter presence flags ────────────────────────────
 val $f = Parquet::features($path)
 assert_ok exists $f->{has_bloom_filter}, "features: bloom flag present"

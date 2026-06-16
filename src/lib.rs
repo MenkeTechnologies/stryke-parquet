@@ -1132,6 +1132,53 @@ fn op_bloom_filter_summary(args: Value) -> Result<Value> {
     }))
 }
 
+/// Report the declared sort order of each row group, from the footer's
+/// `sorting_columns`. A writer can record that data is sorted by certain columns
+/// (ascending/descending, nulls-first) so readers can skip or merge efficiently;
+/// most files leave it unset. Each row group lists `{column, column_idx,
+/// descending, nulls_first}`. Returns `{row_groups: [{row_group, sorting_columns}],
+/// has_sorting_columns}`. Reads only the footer. Pure.
+fn op_sorting_columns_summary(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let descr = m.file_metadata().schema_descr();
+    let mut any = false;
+    let mut row_groups: Vec<Value> = Vec::with_capacity(m.num_row_groups());
+    for j in 0..m.num_row_groups() {
+        let rg = m.row_group(j);
+        let cols: Vec<Value> = match rg.sorting_columns() {
+            Some(sc) if !sc.is_empty() => {
+                any = true;
+                sc.iter()
+                    .map(|s| {
+                        let idx = s.column_idx as usize;
+                        let name = if idx < descr.num_columns() {
+                            descr.column(idx).path().string()
+                        } else {
+                            format!("col_{idx}")
+                        };
+                        json!({
+                            "column": name,
+                            "column_idx": s.column_idx,
+                            "descending": s.descending,
+                            "nulls_first": s.nulls_first,
+                        })
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        row_groups.push(json!({"row_group": j, "sorting_columns": cols}));
+    }
+    Ok(json!({
+        "row_groups": row_groups,
+        "has_sorting_columns": any,
+    }))
+}
+
 /// Read `n` rows starting at absolute row `offset` (default offset 0, n 10).
 /// `head` reads from the start and `tail` from the end; this fills the gap
 /// with an arbitrary window. Honors an optional `columns` projection.
@@ -1392,6 +1439,11 @@ pub extern "C" fn parquet__encoding_summary(args: *const c_char) -> *const c_cha
 #[no_mangle]
 pub extern "C" fn parquet__bloom_filter_summary(args: *const c_char) -> *const c_char {
     ffi_call(args, op_bloom_filter_summary)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__sorting_columns_summary(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_sorting_columns_summary)
 }
 
 #[no_mangle]
@@ -2273,6 +2325,64 @@ mod tests_audit {
         }
         // Missing path errors.
         assert!(op_bloom_filter_summary(json!({})).is_err());
+    }
+
+    #[test]
+    fn op_sorting_columns_summary_reads_declared_sort_order() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use parquet::file::metadata::SortingColumn;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let make_batch = || {
+            let ids = Int64Array::from(vec![1, 2, 3, 4, 5]);
+            let labels =
+                StringArray::from(vec![Some("a"), Some("b"), Some("c"), Some("d"), Some("e")]);
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids), Arc::new(labels)])
+                .unwrap()
+        };
+
+        // Writer declares the data sorted by column 0 descending, nulls first.
+        let on_path = unique_audit_path("sort_on.parquet");
+        let props = WriterProperties::builder()
+            .set_sorting_columns(Some(vec![SortingColumn {
+                column_idx: 0,
+                descending: true,
+                nulls_first: true,
+            }]))
+            .build();
+        let file = File::create(&on_path).unwrap();
+        let mut w = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        w.write(&make_batch()).unwrap();
+        w.close().unwrap();
+        let v = op_sorting_columns_summary(json!({ "path": on_path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&on_path);
+        assert_eq!(v["has_sorting_columns"], json!(true));
+        let sc = &v["row_groups"][0]["sorting_columns"][0];
+        assert_eq!(sc["column"], json!("id"));
+        assert_eq!(sc["column_idx"], json!(0));
+        assert_eq!(sc["descending"], json!(true));
+        assert_eq!(sc["nulls_first"], json!(true));
+
+        // Default writer declares no sort order.
+        let off_path = unique_audit_path("sort_off.parquet");
+        let file = File::create(&off_path).unwrap();
+        let mut w = ArrowWriter::try_new(file, Arc::clone(&schema), None).unwrap();
+        w.write(&make_batch()).unwrap();
+        w.close().unwrap();
+        let v = op_sorting_columns_summary(json!({ "path": off_path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&off_path);
+        assert_eq!(v["has_sorting_columns"], json!(false));
+        assert_eq!(
+            v["row_groups"][0]["sorting_columns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(op_sorting_columns_summary(json!({})).is_err());
     }
 
     #[test]
