@@ -507,6 +507,47 @@ fn op_reverse(args: Value) -> Result<Value> {
     Ok(json!({ "rows": rows }))
 }
 
+/// Select rows by an explicit list of 0-based indices — polars `gather` / pandas
+/// `.iloc[[…]]`. Unlike `slice` (a contiguous window), `head`/`tail` (the ends)
+/// or `sample` (random), the index list is arbitrary: it may repeat a row and
+/// emits rows in exactly the order given. Each index is bounds-checked against
+/// the row count (out-of-range dies). Supports the same `columns` projection.
+/// Returns `{rows}`.
+fn op_gather(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let indices = args["indices"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing indices (array of 0-based row numbers)"))?;
+    let cols = parse_columns(&args["columns"]);
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, cols.as_deref())?;
+    let mut buf = Vec::<u8>::new();
+    {
+        let mut w = JsonWriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(&mut buf);
+        for batch in reader {
+            w.write(&batch?)?;
+        }
+        w.finish()?;
+    }
+    let all = ndjson_to_rows(&buf)?;
+    let n = all.len();
+    let mut out = Vec::with_capacity(indices.len());
+    for v in indices {
+        let i = v
+            .as_u64()
+            .ok_or_else(|| anyhow!("gather: each index must be a non-negative integer"))?
+            as usize;
+        if i >= n {
+            return Err(anyhow!("gather: index {i} out of range (rows: {n})"));
+        }
+        out.push(all[i].clone());
+    }
+    Ok(json!({ "rows": out }))
+}
+
 /// Return an arbitrary row window — `length` rows starting at `offset` (0-based)
 /// — the offset-aware companion to `head`/`tail`. `length` (or `n`) is optional;
 /// when omitted the window runs to the end of the file. An `offset` past the end
@@ -1671,6 +1712,11 @@ pub extern "C" fn parquet__reverse(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__gather(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_gather)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__slice(args: *const c_char) -> *const c_char {
     ffi_call(args, op_slice)
 }
@@ -2117,6 +2163,46 @@ mod tests {
             "reverse puts the last-written row first"
         );
         let _ = std::fs::remove_file(&mpath);
+    }
+
+    #[test]
+    fn op_gather_takes_rows_by_explicit_index_list() {
+        let path = unique_tmp_path("gather.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let ids: Int64Array = vec![10_i64, 20, 30, 40, 50].into();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids)]).unwrap();
+        {
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let ids_of = |v: &Value| -> Vec<i64> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect()
+        };
+        // Arbitrary order, a repeat, and a subset.
+        let r = op_gather(json!({
+            "path": path.to_str().unwrap(),
+            "indices": [4, 0, 2, 2],
+        }))
+        .unwrap();
+        assert_eq!(
+            ids_of(&r),
+            vec![50, 10, 30, 30],
+            "rows follow the index list"
+        );
+        // Out-of-range index dies.
+        let err = op_gather(json!({
+            "path": path.to_str().unwrap(),
+            "indices": [0, 5],
+        }));
+        assert!(err.is_err(), "index 5 is out of range for 5 rows");
+        let _ = std::fs::remove_file(&path);
     }
 }
 

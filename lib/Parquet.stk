@@ -111,6 +111,19 @@ fn Parquet::reverse ($path, %opts) {
     @{ $o->{rows} }
 }
 
+## Rows selected by an explicit list of 0-based indices as hashrefs (polars
+## gather / pandas .iloc[[…]]). Unlike slice (a contiguous window), head/tail
+## (the ends) or sample (random), the index list is arbitrary: it may repeat a
+## row and emits rows in the order given. Out-of-range indices die. Pass
+## `columns => [...]` for column projection. $indices is an arrayref.
+fn Parquet::gather ($path, $indices, %opts) {
+    die "Parquet::gather: file `$path` not found" unless -e $path
+    var %req = (path => $path, indices => $indices)
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("gather", parquet__gather(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
 ## An arbitrary row window as hashrefs — `length` rows starting at `offset`
 ## (0-based), the offset-aware companion to head/tail. Omit `length` to slice to
 ## the end; an `offset` past the end yields no rows. Pass `columns => [...]` for

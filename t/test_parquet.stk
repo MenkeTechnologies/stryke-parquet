@@ -49,6 +49,16 @@ assert_eq $rev[-1]->{name}, "alice", "reverse: first-written row comes last"
 val @revp = Parquet::reverse($path, columns => ["name"])
 assert_eq $revp[0]->{name},  "eve",   "reverse: honors column projection"
 
+# ── gather: rows by explicit index list ─────────────────────────────
+val @g = Parquet::gather($path, [4, 0, 0])
+assert_eq scalar(@g), 3,            "gather: row count = index count"
+assert_eq $g[0]->{name}, "eve",     "gather: index 4 first"
+assert_eq $g[1]->{name}, "alice",   "gather: index 0 second"
+assert_eq $g[2]->{name}, "alice",   "gather: repeated index emits the row twice"
+val @gp = Parquet::gather($path, [4], columns => ["name"])
+assert_eq $gp[0]->{name}, "eve",    "gather: honors column projection"
+assert_dies fn { Parquet::gather($path, [0, 5]) }, "gather: index 5 out of range for 5 rows dies"
+
 # ── slice: arbitrary offset window ──────────────────────────────────
 val @win = Parquet::slice($path, offset => 1, length => 2)
 assert_eq scalar(@win), 2, "slice(1,2): 2 rows"
