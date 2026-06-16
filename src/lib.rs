@@ -473,6 +473,40 @@ fn op_tail(args: Value) -> Result<Value> {
     Ok(json!({"rows": ndjson_to_rows(&buf)?}))
 }
 
+/// Return every row in reverse file order — the whole-file companion to
+/// `head`/`tail` (e.g. newest-first when the file is append-ordered). Reads all
+/// row groups, then reverses the row sequence. Supports the same `columns`
+/// projection as `head`. Returns `{rows}`.
+fn op_reverse(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let cols = parse_columns(&args["columns"]);
+    let file = File::open(path)?;
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?.with_batch_size(8192);
+    if let Some(names) = &cols {
+        let mask = parquet::arrow::ProjectionMask::columns(
+            builder.parquet_schema(),
+            names.iter().map(|s| s.as_str()),
+        );
+        builder = builder.with_projection(mask);
+    }
+    let reader = builder.build()?;
+    let mut buf = Vec::<u8>::new();
+    {
+        let mut w = JsonWriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(&mut buf);
+        for b in reader {
+            w.write(&b?)?;
+        }
+        w.finish()?;
+    }
+    let mut rows = ndjson_to_rows(&buf)?;
+    rows.reverse();
+    Ok(json!({ "rows": rows }))
+}
+
 /// Return an arbitrary row window — `length` rows starting at `offset` (0-based)
 /// — the offset-aware companion to `head`/`tail`. `length` (or `n`) is optional;
 /// when omitted the window runs to the end of the file. An `offset` past the end
@@ -1632,6 +1666,11 @@ pub extern "C" fn parquet__tail(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__reverse(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_reverse)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__slice(args: *const c_char) -> *const c_char {
     ffi_call(args, op_slice)
 }
@@ -2036,6 +2075,48 @@ mod tests {
         let all = op_slice(json!({"path": path.to_str().unwrap()})).unwrap();
         assert_eq!(ids_of(&all), vec![1, 2, 3, 4, 5]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn op_reverse_returns_all_rows_in_reverse_order() {
+        // Single-file ids 1..=5 → reverse is 5,4,3,2,1.
+        let path = unique_tmp_path("reverse.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let ids: Int64Array = vec![1_i64, 2, 3, 4, 5].into();
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids)]).unwrap();
+        {
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let ids_of = |v: &Value| -> Vec<i64> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect()
+        };
+        let r = op_reverse(json!({"path": path.to_str().unwrap()})).unwrap();
+        assert_eq!(ids_of(&r), vec![5, 4, 3, 2, 1]);
+        // Column projection is honored.
+        let proj = op_reverse(json!({"path": path.to_str().unwrap(), "columns": ["id"]})).unwrap();
+        assert_eq!(ids_of(&proj), vec![5, 4, 3, 2, 1]);
+        let _ = std::fs::remove_file(&path);
+
+        // Across multiple row groups, the global row order is reversed (last
+        // written row, 10, comes first).
+        let mpath = unique_tmp_path("reverse_multi.parquet");
+        write_multi_rg_parquet(&mpath);
+        let mr = op_reverse(json!({"path": mpath.to_str().unwrap()})).unwrap();
+        let rows = mr["rows"].as_array().unwrap();
+        assert_eq!(
+            rows[0]["v"],
+            json!(10),
+            "reverse puts the last-written row first"
+        );
+        let _ = std::fs::remove_file(&mpath);
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "stryke-parquet"
-version = "0.15.0"
+version = "0.16.0"
 description = "Parquet file inspector / transform cdylib for stryke. Schema, footer stats, row-group breakdown, head/tail, JSON/CSV conversion, recompression. Dlopened in-process via stryke's FFI bridge."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -20,6 +20,7 @@ exports = [
     "parquet__stats",
     "parquet__head",
     "parquet__tail",
+    "parquet__reverse",
     "parquet__slice",
     "parquet__to_json",
     "parquet__to_csv",

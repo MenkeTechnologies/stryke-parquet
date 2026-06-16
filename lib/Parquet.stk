@@ -100,6 +100,17 @@ fn Parquet::tail ($path, %opts) {
     @{ $o->{rows} }
 }
 
+## Every row in reverse file order as hashrefs — the whole-file companion to
+## head/tail (e.g. newest-first when the file is append-ordered). Pass
+## `columns => [...]` for column projection.
+fn Parquet::reverse ($path, %opts) {
+    die "Parquet::reverse: file `$path` not found" unless -e $path
+    var %req = (path => $path)
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("reverse", parquet__reverse(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
 ## An arbitrary row window as hashrefs — `length` rows starting at `offset`
 ## (0-based), the offset-aware companion to head/tail. Omit `length` to slice to
 ## the end; an `offset` past the end yields no rows. Pass `columns => [...]` for

@@ -41,6 +41,14 @@ val @last = Parquet::tail($path, n => 2)
 assert_eq scalar(@last), 2, "tail(2): 2 rows"
 assert_eq $last[-1]->{name}, "eve", "tail(2): last.name=eve"
 
+# ── reverse: all rows in reverse file order ─────────────────────────
+val @rev = Parquet::reverse($path)
+assert_eq scalar(@rev), 5,           "reverse: returns every row"
+assert_eq $rev[0]->{name},  "eve",   "reverse: last-written row comes first"
+assert_eq $rev[-1]->{name}, "alice", "reverse: first-written row comes last"
+val @revp = Parquet::reverse($path, columns => ["name"])
+assert_eq $revp[0]->{name},  "eve",   "reverse: honors column projection"
+
 # ── slice: arbitrary offset window ──────────────────────────────────
 val @win = Parquet::slice($path, offset => 1, length => 2)
 assert_eq scalar(@win), 2, "slice(1,2): 2 rows"

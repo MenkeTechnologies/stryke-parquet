@@ -140,6 +140,7 @@ Parquet::stats      $path, %opts → @stats         # opts: column
 Parquet::head       $path, %opts → @rows          # opts: n, columns
 Parquet::slice      $path, %opts → @rows          # opts: offset, length (to end if omitted), columns — offset window
 Parquet::tail       $path, %opts → @rows
+Parquet::reverse    $path, %opts → @rows          # every row in reverse file order (newest-first); opts: columns
 Parquet::to_json    $path, %opts → @rows
 Parquet::stream     $path, %opts → $count         # callback per row
 Parquet::to_csv     $path, %opts → $csv | $path   # opts: output, columns
