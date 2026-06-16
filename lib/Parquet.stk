@@ -287,6 +287,15 @@ fn Parquet::encoding_summary ($path) {
     Parquet::_decode("encoding_summary", parquet__encoding_summary(to_json({ path => $path })))
 }
 
+## Which columns carry a bloom filter (read from the footer's per-chunk
+## bloom_filter_offset). Returns { columns => [{ column, has_bloom_filter,
+## chunks_with_filter }], columns_with_bloom_filter, columns_total }. Bloom
+## filters accelerate point lookups but are written only when enabled.
+fn Parquet::bloom_filter_summary ($path) {
+    die "Parquet::bloom_filter_summary: file `$path` not found" unless -e $path
+    Parquet::_decode("bloom_filter_summary", parquet__bloom_filter_summary(to_json({ path => $path })))
+}
+
 ## Read $opts{n} rows (default 10) starting at absolute row $opts{offset}
 ## (default 0). Fills the window head/tail can't. opts: offset, n, columns.
 fn Parquet::sample ($path, %opts) {

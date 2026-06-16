@@ -1081,6 +1081,57 @@ fn op_encoding_summary(args: Value) -> Result<Value> {
     Ok(json!({ "columns": columns }))
 }
 
+/// Report which columns carry a bloom filter, read from the footer's per-chunk
+/// `bloom_filter_offset`. Bloom filters accelerate point lookups (`col = x`) but
+/// are written only when explicitly enabled, so auditing their presence matters.
+/// A column counts as having one if any of its chunks does. Returns per-column
+/// `{column, has_bloom_filter, chunks_with_filter}` plus file-level counts.
+fn op_bloom_filter_summary(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let r = open_serialized(Path::new(path))?;
+    let m = r.metadata();
+    let descr = m.file_metadata().schema_descr();
+    let mut order: Vec<String> = Vec::new();
+    let mut chunks_with: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for j in 0..m.num_row_groups() {
+        let rg = m.row_group(j);
+        for i in 0..rg.num_columns() {
+            let col = rg.column(i);
+            let name = descr.column(i).path().string();
+            if !chunks_with.contains_key(&name) {
+                order.push(name.clone());
+                chunks_with.insert(name.clone(), 0);
+            }
+            if col.bloom_filter_offset().is_some() {
+                *chunks_with.get_mut(&name).unwrap() += 1;
+            }
+        }
+    }
+    let mut with_filter = 0i64;
+    let columns: Vec<Value> = order
+        .into_iter()
+        .map(|n| {
+            let c = chunks_with[&n];
+            if c > 0 {
+                with_filter += 1;
+            }
+            json!({
+                "column": n,
+                "has_bloom_filter": c > 0,
+                "chunks_with_filter": c,
+            })
+        })
+        .collect();
+    let total = columns.len() as i64;
+    Ok(json!({
+        "columns": columns,
+        "columns_with_bloom_filter": with_filter,
+        "columns_total": total,
+    }))
+}
+
 /// Read `n` rows starting at absolute row `offset` (default offset 0, n 10).
 /// `head` reads from the start and `tail` from the end; this fills the gap
 /// with an arbitrary window. Honors an optional `columns` projection.
@@ -1336,6 +1387,11 @@ pub extern "C" fn parquet__null_summary(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__encoding_summary(args: *const c_char) -> *const c_char {
     ffi_call(args, op_encoding_summary)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__bloom_filter_summary(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_bloom_filter_summary)
 }
 
 #[no_mangle]
@@ -2158,6 +2214,65 @@ mod tests_audit {
             sorted.dedup();
             assert_eq!(names, sorted, "encodings are sorted and deduped");
         }
+    }
+
+    #[test]
+    fn op_bloom_filter_summary_detects_enabled_and_absent_filters() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let make_batch = || {
+            let ids = Int64Array::from(vec![1, 2, 3, 4, 5]);
+            let labels =
+                StringArray::from(vec![Some("a"), Some("b"), Some("c"), Some("d"), Some("e")]);
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids), Arc::new(labels)])
+                .unwrap()
+        };
+
+        // Bloom filters enabled on every column.
+        let with_path = unique_audit_path("bloom_on.parquet");
+        let props = WriterProperties::builder()
+            .set_bloom_filter_enabled(true)
+            .build();
+        let file = File::create(&with_path).unwrap();
+        let mut w = ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).unwrap();
+        w.write(&make_batch()).unwrap();
+        w.close().unwrap();
+        let v = op_bloom_filter_summary(json!({ "path": with_path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&with_path);
+        assert_eq!(v["columns_total"].as_i64().unwrap(), 2);
+        assert_eq!(
+            v["columns_with_bloom_filter"].as_i64().unwrap(),
+            2,
+            "both columns carry a bloom filter"
+        );
+        for c in v["columns"].as_array().unwrap() {
+            assert_eq!(c["has_bloom_filter"], json!(true));
+            assert!(c["chunks_with_filter"].as_i64().unwrap() >= 1);
+        }
+
+        // Default writer: no bloom filters.
+        let off_path = unique_audit_path("bloom_off.parquet");
+        let file = File::create(&off_path).unwrap();
+        let mut w = ArrowWriter::try_new(file, Arc::clone(&schema), None).unwrap();
+        w.write(&make_batch()).unwrap();
+        w.close().unwrap();
+        let v = op_bloom_filter_summary(json!({ "path": off_path.to_str().unwrap() })).unwrap();
+        let _ = std::fs::remove_file(&off_path);
+        assert_eq!(
+            v["columns_with_bloom_filter"].as_i64().unwrap(),
+            0,
+            "none by default"
+        );
+        for c in v["columns"].as_array().unwrap() {
+            assert_eq!(c["has_bloom_filter"], json!(false));
+            assert_eq!(c["chunks_with_filter"].as_i64().unwrap(), 0);
+        }
+        // Missing path errors.
+        assert!(op_bloom_filter_summary(json!({})).is_err());
     }
 
     #[test]

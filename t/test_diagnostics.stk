@@ -73,6 +73,14 @@ assert_ok scalar(@{ $ec->{encodings} }) >= 1, "encoding_summary: score reports a
 assert_ok scalar(@{ $ec->{compression} }) >= 1, "encoding_summary: score reports a compression codec"
 assert_dies fn { Parquet::encoding_summary("$tmp/missing.parquet") }, "encoding_summary: dies on a missing file"
 
+# ── bloom_filter_summary: per-column bloom-filter presence (footer-only) ──
+val $bf = Parquet::bloom_filter_summary($path)
+assert_eq scalar(@{ $bf->{columns} }), 3, "bloom_filter_summary: one entry per column"
+assert_eq $bf->{columns_total}, 3, "bloom_filter_summary: column total"
+assert_eq $bf->{columns_with_bloom_filter}, 0, "bloom_filter_summary: demo file has no bloom filters"
+assert_eq $bf->{columns}[0]{has_bloom_filter}, 0, "bloom_filter_summary: absence reported per column"
+assert_dies fn { Parquet::bloom_filter_summary("$tmp/missing.parquet") }, "bloom_filter_summary: dies on a missing file"
+
 # ── features: index/filter presence flags ────────────────────────────
 val $f = Parquet::features($path)
 assert_ok exists $f->{has_bloom_filter}, "features: bloom flag present"

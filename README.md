@@ -165,6 +165,7 @@ Parquet::size_report         $path → { total_compressed_size, total_uncompress
 Parquet::null_summary        $path → { num_rows, total_nulls,
                                        columns:[{column, null_count, null_fraction}] }   # null_count null = unknown
 Parquet::encoding_summary    $path → { columns:[{column, encodings, compression}] }   # footer-only physical-encoding rollup per column
+Parquet::bloom_filter_summary $path → { columns:[{column, has_bloom_filter, chunks_with_filter}], columns_with_bloom_filter, columns_total }   # footer-only bloom-filter presence per column
 Parquet::sample              $path, %opts → @rows   # opts: offset, n, columns — arbitrary window
 Parquet::features            $path → { has_bloom_filter, has_column_index, has_offset_index,
                                        columns:[{column, bloom_filter, column_index, offset_index}] }
