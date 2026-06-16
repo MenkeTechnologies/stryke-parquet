@@ -121,7 +121,7 @@ cdylib is dlopened in-process on first `use Parquet` (via stryke's
 inspection (`version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
 `metadata`), row read (`head`, `tail`, `to_json`, `to_csv`), conversion
 (`from_csv`, `from_json`, `write`, `write_partitioned`, `compress`,
-`merge`), and diagnostics (`validate`, `column_chunk_stats`, `size_report`, `null_summary`,
+`merge`, `select`), and diagnostics (`validate`, `column_chunk_stats`, `size_report`, `null_summary`,
 `encoding_summary`, `row_group_summary`, `sample`, `features`). The authoritative list is `[ffi].exports` in
 `stryke.toml`.
 
@@ -148,6 +148,7 @@ Parquet::from_json  $src, $dst, %opts → \%resp    # NDJSON → parquet; opts: 
 Parquet::write      \@rows, $dst, %opts → \%resp  # in-memory rows (hashrefs) → parquet; opts: codec
 Parquet::write_partitioned \@rows, $dst, $column, %opts → \%resp  # Hive col=val/ dirs; opts: codec
 Parquet::merge      \@srcs, $dst, %opts → \%resp  # concat same-schema files; opts: codec
+Parquet::select     $path, $dst, \@cols, %opts → \%resp  # project a column subset into a new file (column pruning); unknown column errors
 Parquet::metadata   $path → \%resp                # writer kv metadata + created_by + version
 ```
 

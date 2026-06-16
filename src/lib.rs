@@ -655,6 +655,52 @@ fn op_merge(args: Value) -> Result<Value> {
     Ok(json!({"dst": dst, "files": srcs.len(), "rows": rows, "compression": compression}))
 }
 
+/// Project a subset of columns into a new parquet file (column pruning) — the
+/// write-to-file companion to `head`/`tail`'s preview projection. `columns` is a
+/// non-empty array of names; every name must exist (a `ProjectionMask` silently
+/// drops unknown names, which would quietly write a file missing a column, so we
+/// validate up front). Output keeps the file's column order, not the requested
+/// order, and the row count is preserved. opts: path, dst, columns, optional
+/// compression (default zstd). Pure transform.
+fn op_select(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let cols = parse_columns(&args["columns"])
+        .ok_or_else(|| anyhow!("missing columns (a non-empty array of names)"))?;
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    // Validate every requested column exists; ProjectionMask ignores unknowns.
+    let probe = open_parquet_reader(Path::new(path), 1)?;
+    let have: std::collections::HashSet<String> = probe
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    for c in &cols {
+        if !have.contains(c) {
+            bail!("select: no column `{c}` in `{path}`");
+        }
+    }
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, Some(&cols))?;
+    let schema = reader.schema();
+    let kept: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    let props = WriterProperties::builder()
+        .set_compression(compression_for(&compression)?)
+        .build();
+    let file = File::create(dst)?;
+    let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
+    let mut rows = 0;
+    for batch in reader {
+        let b = batch?;
+        rows += b.num_rows();
+        w.write(&b)?;
+    }
+    w.close()?;
+    Ok(json!({"dst": dst, "rows": rows, "columns": kept, "compression": compression}))
+}
+
 fn op_write(args: Value) -> Result<Value> {
     use arrow_json::reader::{infer_json_schema_from_seekable, ReaderBuilder as JsonReaderBuilder};
     use std::io::Cursor;
@@ -1392,6 +1438,11 @@ pub extern "C" fn parquet__merge(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__select(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_select)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__write(args: *const c_char) -> *const c_char {
     ffi_call(args, op_write)
 }
@@ -2028,6 +2079,57 @@ mod tests_audit {
         );
         let _ = std::fs::remove_file(&csv);
         let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn op_select_projects_a_column_subset_to_a_new_file() {
+        let csv = unique_audit_path("select.csv");
+        std::fs::write(&csv, "id,name,score\n1,a,10\n2,b,20\n3,c,30\n").unwrap();
+        let src = unique_audit_path("select_src.parquet");
+        op_from_csv(json!({
+            "src": csv.to_str().unwrap(),
+            "dst": src.to_str().unwrap(),
+        }))
+        .unwrap();
+        let out = unique_audit_path("select_out.parquet");
+        let r = op_select(json!({
+            "path": src.to_str().unwrap(),
+            "dst": out.to_str().unwrap(),
+            "columns": ["id", "score"],
+        }))
+        .unwrap();
+        // Row count preserved; only the two requested columns written (file order).
+        assert_eq!(r["rows"], json!(3), "all rows preserved");
+        assert_eq!(r["columns"], json!(["id", "score"]), "only id+score kept");
+        assert_eq!(count_parquet_rows(&out), 3);
+        // The output schema really has 2 fields — `name` was pruned.
+        let sch = op_schema(json!({"path": out.to_str().unwrap()})).unwrap();
+        assert_eq!(
+            sch["num_fields"],
+            json!(2),
+            "name column pruned from the file"
+        );
+        let names: Vec<&str> = sch["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["id", "score"]);
+        // An unknown column errors rather than silently writing fewer columns.
+        assert!(op_select(json!({
+            "path": src.to_str().unwrap(), "dst": out.to_str().unwrap(),
+            "columns": ["id", "nope"],
+        }))
+        .is_err());
+        // Missing/empty columns errors.
+        assert!(op_select(json!({
+            "path": src.to_str().unwrap(), "dst": out.to_str().unwrap(),
+        }))
+        .is_err());
+        let _ = std::fs::remove_file(&csv);
+        let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&out);
     }
 

@@ -206,6 +206,19 @@ fn Parquet::merge ($srcs, $dst, %opts) {
         })))
 }
 
+## Project a subset of $cols (arrayref of names; every name must exist) from
+## $path into a new parquet $dst — column pruning. Output keeps the file's column
+## order and the row count. opts: codec/compression (default zstd). Returns
+## { dst, rows, columns, compression }.
+fn Parquet::select ($path, $dst, $cols, %opts) {
+    die "Parquet::select: cols must be an arrayref" unless ref($cols) eq "ARRAY"
+    Parquet::_decode("select",
+        parquet__select(to_json({
+            path => $path, dst => $dst, columns => $cols,
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}
+
 ## Write in-memory $rows (arrayref of hashrefs) to a parquet $dst. Schema is
 ## inferred from the rows. opts: codec/compression (default zstd).
 ## Returns { dst, rows, compression }.

@@ -38,6 +38,7 @@ assert_ok exists &Parquet::is_empty, "Parquet::is_empty exists"
 assert_ok exists &Parquet::from_csv, "Parquet::from_csv exists"
 assert_ok exists &Parquet::from_json, "Parquet::from_json exists"
 assert_ok exists &Parquet::merge, "Parquet::merge exists"
+assert_ok exists &Parquet::select, "Parquet::select exists"
 
 assert_ok exists &Parquet::write, "Parquet::write exists"
 assert_ok exists &Parquet::metadata, "Parquet::metadata exists"

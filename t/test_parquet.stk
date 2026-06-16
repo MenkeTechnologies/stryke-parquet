@@ -76,9 +76,18 @@ assert_eq $cr->{num_rows}, 5, "compress: num_rows=5 (alias of rows)"
 assert_eq $cr->{compression}, "snappy", "compress: codec=snappy"
 assert_ok -e $path2, "compress: output file exists"
 
+# ── select: project a column subset into a new file ─────────────────
+val $proj = "$tmp/demo-proj.parquet"
+val $sel = Parquet::select($path, $proj, ["id", "score"])
+assert_eq $sel->{rows}, 5,                      "select: all 5 rows preserved"
+assert_eq join(",", @{ $sel->{columns} }), "id,score", "select: only id+score kept"
+assert_eq Parquet::schema($proj)->{num_fields}, 2, "select: pruned file has 2 fields (name dropped)"
+assert_dies fn { Parquet::select($path, $proj, ["id", "nope"]) }, "select: dies on an unknown column"
+
 # cleanup
 unlink $path  if -e $path
 unlink $path2 if -e $path2
+unlink $proj  if -e $proj
 rmdir $tmp   if -d $tmp
 
 test_run
