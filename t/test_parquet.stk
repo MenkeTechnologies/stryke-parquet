@@ -59,6 +59,19 @@ val @gp = Parquet::gather($path, [4], columns => ["name"])
 assert_eq $gp[0]->{name}, "eve",    "gather: honors column projection"
 assert_dies fn { Parquet::gather($path, [0, 5]) }, "gather: index 5 out of range for 5 rows dies"
 
+# ── top_k: the k rows with the largest/smallest values in a column ───
+val @tk = Parquet::top_k($path, "id", 2)
+assert_eq scalar(@tk), 2,           "top_k: keeps k rows"
+assert_eq $tk[0]->{name}, "eve",    "top_k: largest id first (eve=5)"
+assert_eq $tk[1]->{name}, "dave",   "top_k: second largest (dave=4)"
+val @bk = Parquet::top_k($path, "id", 2, descending => 0)
+assert_eq $bk[0]->{name}, "alice",  "top_k descending=>0: smallest id first (bottom_k)"
+# score has a NULL (carol) — it must never take a top slot.
+val @ts = Parquet::top_k($path, "score", 5)
+assert_eq $ts[-1]->{name}, "carol", "top_k: the null-score row sorts last"
+assert_eq scalar(Parquet::top_k($path, "id", 100)), 5, "top_k: k caps at the row count"
+assert_dies fn { Parquet::top_k($path, "nope", 1) }, "top_k: unknown column dies"
+
 # ── value_counts: frequency per distinct value ──────────────────────
 val $vcsrc = "$tmp/vc.ndjson"
 spurt($vcsrc, qq({"c":"red"}\n{"c":"blue"}\n{"c":"red"}\n{"c":"green"}\n{"c":"blue"}\n{"c":"red"}\n))

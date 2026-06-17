@@ -365,6 +365,33 @@ fn cmp_lt(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Total ordering over scalar JSON values for row ranking — numbers numerically,
+/// strings lexicographically, bools false < true. Mixed types fall back to a
+/// fixed type rank so the sort stays deterministic (a Parquet column is
+/// homogeneous, so that path is only a safety net). Unlike `cmp_lt`, this handles
+/// non-numeric columns. Nulls are handled by the caller (sorted last).
+fn value_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Number(_), Value::Number(_)) => a
+            .as_f64()
+            .zip(b.as_f64())
+            .and_then(|(x, y)| x.partial_cmp(&y))
+            .unwrap_or(Ordering::Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ => {
+            let rank = |v: &Value| match v {
+                Value::Number(_) => 0,
+                Value::String(_) => 1,
+                Value::Bool(_) => 2,
+                _ => 3,
+            };
+            rank(a).cmp(&rank(b))
+        }
+    }
+}
+
 // ── ops: row read / convert ─────────────────────────────────────────────────
 
 fn op_head(args: Value) -> Result<Value> {
@@ -546,6 +573,71 @@ fn op_gather(args: Value) -> Result<Value> {
         out.push(all[i].clone());
     }
     Ok(json!({ "rows": out }))
+}
+
+/// The `k` rows with the largest (or smallest) values in a `column` — polars
+/// `top_k`. `descending` defaults to true (largest first); pass it falsy for the
+/// smallest (`bottom_k`). Nulls sort last so they never take a top slot, and `k`
+/// caps at the row count. The column must exist in the footer schema. opts: `path`
+/// (required), `column` (or `by`), `k`, `descending`. Returns `{rows}`.
+fn op_top_k(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let column = args["column"]
+        .as_str()
+        .or_else(|| args["by"].as_str())
+        .ok_or_else(|| anyhow!("missing column"))?
+        .to_string();
+    let k = args["k"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("missing k (number of rows to keep)"))? as usize;
+    // Absent → top (descending); an explicit 0/false flips to bottom_k.
+    let descending = match &args["descending"] {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|x| x != 0.0).unwrap_or(true),
+        Value::Null => true,
+        _ => true,
+    };
+    // The column must exist in the footer schema (else an absent key would just
+    // sort every row as null).
+    let sr = open_serialized(Path::new(path))?;
+    let descr = sr.metadata().file_metadata().schema_descr();
+    let exists = (0..descr.num_columns()).any(|i| descr.column(i).path().string() == column);
+    if !exists {
+        return Err(anyhow!("top_k: no column `{column}`"));
+    }
+    let reader = open_parquet_reader_with_columns(Path::new(path), 8192, None)?;
+    let mut buf = Vec::<u8>::new();
+    {
+        let mut w = JsonWriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, LineDelimited>(&mut buf);
+        for batch in reader {
+            w.write(&batch?)?;
+        }
+        w.finish()?;
+    }
+    let mut rows = ndjson_to_rows(&buf)?;
+    rows.sort_by(|a, b| {
+        let av = a.get(&column).unwrap_or(&Value::Null);
+        let bv = b.get(&column).unwrap_or(&Value::Null);
+        match (av.is_null(), bv.is_null()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater, // nulls last, both directions
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => {
+                let ord = value_cmp(av, bv);
+                if descending {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            }
+        }
+    });
+    rows.truncate(k);
+    Ok(json!({ "rows": rows }))
 }
 
 /// Frequency of each distinct value in a `column` — pandas/polars `value_counts`,
@@ -1770,6 +1862,11 @@ pub extern "C" fn parquet__gather(args: *const c_char) -> *const c_char {
 }
 
 #[no_mangle]
+pub extern "C" fn parquet__top_k(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_top_k)
+}
+
+#[no_mangle]
 pub extern "C" fn parquet__value_counts(args: *const c_char) -> *const c_char {
     ffi_call(args, op_value_counts)
 }
@@ -2260,6 +2357,73 @@ mod tests {
             "indices": [0, 5],
         }));
         assert!(err.is_err(), "index 5 is out of range for 5 rows");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn op_top_k_ranks_rows_by_column_with_nulls_last() {
+        let path = unique_tmp_path("topk.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let ids: Int64Array = vec![10_i64, 50, 30, 20, 40].into();
+        let names =
+            arrow::array::StringArray::from(vec![Some("c"), Some("a"), None, Some("e"), Some("b")]);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(ids), Arc::new(names)])
+            .unwrap();
+        {
+            let file = File::create(&path).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let p = path.to_str().unwrap();
+        let ids_of = |v: &Value| -> Vec<i64> {
+            v["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap())
+                .collect()
+        };
+        // Numeric: top 2 by id (largest first) and bottom 2 (descending => 0).
+        assert_eq!(
+            ids_of(&op_top_k(json!({"path": p, "column": "id", "k": 2})).unwrap()),
+            vec![50, 40]
+        );
+        assert_eq!(
+            ids_of(&op_top_k(json!({"path": p, "column": "id", "k": 2, "descending": 0})).unwrap()),
+            vec![10, 20]
+        );
+        // String column: ordered a < b < c < e; the null name (id 30) sorts last.
+        assert_eq!(
+            ids_of(&op_top_k(json!({"path": p, "column": "name", "k": 2})).unwrap()),
+            vec![20, 10],
+            "top 2 by name string, null excluded"
+        );
+        assert_eq!(
+            ids_of(
+                &op_top_k(json!({"path": p, "column": "name", "k": 2, "descending": 0})).unwrap()
+            ),
+            vec![50, 40],
+            "bottom 2 by name string"
+        );
+        assert_eq!(
+            ids_of(&op_top_k(json!({"path": p, "column": "name", "k": 5})).unwrap()).last(),
+            Some(&30),
+            "the null-name row never takes a top slot"
+        );
+        // k beyond the row count caps; unknown column and missing k die.
+        assert_eq!(
+            op_top_k(json!({"path": p, "column": "id", "k": 100})).unwrap()["rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        assert!(op_top_k(json!({"path": p, "column": "nope", "k": 1})).is_err());
+        assert!(op_top_k(json!({"path": p, "column": "id"})).is_err());
         let _ = std::fs::remove_file(&path);
     }
 

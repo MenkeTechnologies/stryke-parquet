@@ -124,6 +124,18 @@ fn Parquet::gather ($path, $indices, %opts) {
     @{ $o->{rows} }
 }
 
+## The $k rows with the largest values in $column (polars top_k). Pass
+## descending => 0 in %opts for the smallest (bottom_k). Nulls sort last so they
+## never take a top slot; $k caps at the row count and the column must exist.
+## Returns the selected rows (a list of hashrefs).
+fn Parquet::top_k ($path, $column, $k, %opts) {
+    die "Parquet::top_k: file `$path` not found" unless -e $path
+    var %req = (path => $path, column => $column, k => $k)
+    $req{descending} = exists($opts{descending}) ? $opts{descending} : 1
+    val $o = Parquet::_decode("top_k", parquet__top_k(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
 ## Frequency of each distinct value in $column as { value, count } hashrefs
 ## (pandas/polars value_counts; mirrors Arrow::value_counts). One entry per
 ## distinct value (nulls form their own group), sorted by count descending then
