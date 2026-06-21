@@ -118,12 +118,15 @@ Each `Parquet::*` wrapper builds a JSON args dict and calls a sibling
 `parquet__*` symbol resolved out of `libstryke_parquet.{dylib,so}`. The
 cdylib is dlopened in-process on first `use Parquet` (via stryke's
 `pkg::commands::try_load_ffi_for` resolver hook). Its exports span
-inspection (`version`, `inspect`, `schema`, `count`, `rowgroups`, `stats`,
-`metadata`), row read (`head`, `tail`, `to_json`, `to_csv`), conversion
-(`from_csv`, `from_json`, `write`, `write_partitioned`, `compress`,
-`merge`, `select`), and diagnostics (`validate`, `column_chunk_stats`, `size_report`, `null_summary`,
-`encoding_summary`, `row_group_summary`, `sample`, `features`). The authoritative list is `[ffi].exports` in
-`stryke.toml`.
+inspection (`version`, `inspect`, `schema`, `dtypes`, `count`, `rowgroups`,
+`stats`, `metadata`), row read (`head`, `tail`, `to_json`, `to_csv`,
+`to_ndjson`), row predicates / reshaping (`filter`, `where_count`,
+`filter_to`, `distinct`, `sort`, `column`, `sum`, `describe`, `group_by`,
+`random_sample`), conversion (`from_csv`, `from_json`, `write`,
+`write_partitioned`, `compress`, `repartition`, `merge`, `select`), and
+diagnostics (`validate`, `column_chunk_stats`, `size_report`, `null_summary`,
+`encoding_summary`, `row_group_summary`, `sample`, `features`). The
+authoritative list is `[ffi].exports` in `stryke.toml`.
 
 Stateless package — parquet operations are file transforms; no
 process-level cache.
@@ -157,7 +160,28 @@ Parquet::hstack     $path, $other, $dst, %opts → \%resp  # horizontal: append 
 Parquet::select     $path, $dst, \@cols, %opts → \%resp  # project a column subset into a new file (column pruning); unknown column errors
 Parquet::drop       $path, $dst, \@cols, %opts → \%resp  # complement of select: keep all columns but \@cols; unknown column / drop-all errors
 Parquet::rename     $path, $dst, \%map, %opts → \%resp   # relabel columns { old => new }; preserves types/order/rows; unknown column / name-collision errors
+Parquet::repartition $src, $dst, %opts → \%resp   # rewrite with a target max row-group row count; opts: row_group (default 65536), codec
+Parquet::to_ndjson  $path, $dst → \%resp          # parquet → NDJSON file (inverse of from_json)
+Parquet::dtypes     $path → \%resp                # each column's Arrow logical type: { num_fields, columns:[{name, dtype, nullable}] }
 Parquet::metadata   $path → \%resp                # writer kv metadata + created_by + version
+```
+
+### Row predicates / reshaping (polars-style)
+
+Materialize the file once, then transform the JSON rows. Comparison is numeric
+for numbers, lexicographic for strings; nulls always sort last.
+
+```stryke
+Parquet::filter      $path, $column, $op, %opts → @rows   # rows where $column OP $value (eq/ne/gt/ge/lt/le, = != > >= < <=, is_null/is_not_null); opts: value, columns
+Parquet::where_count $path, $column, $op, %opts → $n      # count-only companion to filter (same grammar); opts: value
+Parquet::filter_to   $path, $dst, $column, $op, %opts → \%resp  # write only matching rows to a new file; empty result errors; opts: value, codec
+Parquet::distinct    $path, %opts → @rows                 # unique rows (polars unique); opts: columns (key + projection); first occurrence wins
+Parquet::sort        $path, $column, %opts → @rows        # ORDER BY $column; opts: descending => 1, columns; nulls last, stable
+Parquet::column      $path, $column → @values             # a single column's cells as a flat list (polars Series)
+Parquet::sum         $path, $column → $sum                # numeric sum of $column (nulls/non-numeric skipped)
+Parquet::describe    $path → \%resp                       # per-column { count, null_count, min, max, mean, sum }; non-numeric → null numerics
+Parquet::group_by    $path, $by, %opts → @groups          # GROUP BY $by → { key, count, value }; opts: agg, func (count/sum/min/max/mean)
+Parquet::random_sample $path, %opts → @rows               # n random rows (reservoir, reproducible per seed); opts: n, seed, columns; keeps file order
 ```
 
 ### Diagnostics
@@ -305,6 +329,7 @@ stryke-parquet/
     test_parquet.stk
     test_stryke_parquet_surface.stk
   examples/
+    diagnostics.stk
     discover.stk
     inspect.stk
     head_stats.stk

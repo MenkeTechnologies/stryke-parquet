@@ -48,6 +48,19 @@ exports = [
     "parquet__sorting_columns_summary",
     "parquet__sample",
     "parquet__features",
+    "parquet__filter",
+    "parquet__where_count",
+    "parquet__filter_to",
+    "parquet__distinct",
+    "parquet__sort",
+    "parquet__column",
+    "parquet__sum",
+    "parquet__describe",
+    "parquet__group_by",
+    "parquet__random_sample",
+    "parquet__to_ndjson",
+    "parquet__repartition",
+    "parquet__dtypes",
 ]
 
 [scripts]

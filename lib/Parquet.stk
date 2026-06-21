@@ -433,3 +433,142 @@ fn Parquet::features ($path) {
     die "Parquet::features: file `$path` not found" unless -e $path
     Parquet::_decode("features", parquet__features(to_json({ path => $path })))
 }
+
+# ── row predicates / reshaping (polars-style) ────────────────────────
+
+## Rows matching $column OP $value as hashrefs — polars filter / SQL WHERE.
+## $op is one of eq/ne/gt/ge/lt/le (aliases = != > >= < <=) plus
+## is_null/is_not_null (for which $value is ignored). Comparison is numeric for
+## numbers, lexicographic for strings; a null cell matches only is_null. Pass
+## `columns => [...]` for column projection. Returns the matching rows.
+fn Parquet::filter ($path, $column, $op, %opts) {
+    die "Parquet::filter: file `$path` not found" unless -e $path
+    var %req = (path => $path, column => $column, op => $op)
+    $req{value}   = $opts{value}   if exists $opts{value}
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("filter", parquet__filter(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
+## Count rows matching $column OP $value without materializing them — the
+## count-only companion to filter. Same predicate grammar. Returns the match
+## count (a scalar).
+fn Parquet::where_count ($path, $column, $op, %opts) {
+    die "Parquet::where_count: file `$path` not found" unless -e $path
+    var %req = (path => $path, column => $column, op => $op)
+    $req{value} = $opts{value} if exists $opts{value}
+    Parquet::_decode("where_count", parquet__where_count(to_json(\%req)))->{matched}
+}
+
+## Write rows matching $column OP $value to a new parquet $dst — the
+## file-producing companion to filter. Same predicate grammar; an empty result
+## is rejected (no schema to infer). opts: value, codec/compression (default
+## zstd). Returns { dst, rows, matched, compression }.
+fn Parquet::filter_to ($path, $dst, $column, $op, %opts) {
+    die "Parquet::filter_to: file `$path` not found" unless -e $path
+    var %req = (path => $path, dst => $dst, column => $column, op => $op,
+                compression => ($opts{codec} // $opts{compression}))
+    $req{value} = $opts{value} if exists $opts{value}
+    Parquet::_decode("filter_to", parquet__filter_to(to_json(\%req)))
+}
+
+## Distinct rows as hashrefs — polars unique / SQL DISTINCT. With
+## `columns => [...]` the uniqueness key is that subset (and only those columns
+## are returned); without it the whole row is the key. First occurrence wins, so
+## the surviving rows keep file order. Returns the distinct rows.
+fn Parquet::distinct ($path, %opts) {
+    die "Parquet::distinct: file `$path` not found" unless -e $path
+    var %req = (path => $path)
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("distinct", parquet__distinct(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
+## Rows sorted by $column as hashrefs — polars sort / SQL ORDER BY. Pass
+## `descending => 1` for descending (default ascending). Numbers sort
+## numerically, strings lexicographically; nulls always sort last. The sort is
+## stable. opts: descending, columns. Returns the sorted rows.
+fn Parquet::sort ($path, $column, %opts) {
+    die "Parquet::sort: file `$path` not found" unless -e $path
+    var %req = (path => $path, column => $column, descending => ($opts{descending} // 0))
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("sort", parquet__sort(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
+## A single column's cells as a flat list — polars Series / df[col]. Reads only
+## that column. The column must exist. Returns the list of values.
+fn Parquet::column ($path, $column) {
+    die "Parquet::column: file `$path` not found" unless -e $path
+    val $o = Parquet::_decode("column", parquet__column(to_json({ path => $path, column => $column })))
+    @{ $o->{values} }
+}
+
+## The sum of a numeric $column — SQL SUM. Non-numeric and null cells are
+## skipped. The column must exist. Returns the sum (a scalar).
+fn Parquet::sum ($path, $column) {
+    die "Parquet::sum: file `$path` not found" unless -e $path
+    Parquet::_decode("sum", parquet__sum(to_json({ path => $path, column => $column })))->{sum}
+}
+
+## Per-column numeric summary — pandas/polars describe. Returns
+## { num_rows, columns => [{ column, count, null_count, min, max, mean, sum }] };
+## non-numeric columns report null for the numeric fields.
+fn Parquet::describe ($path) {
+    die "Parquet::describe: file `$path` not found" unless -e $path
+    Parquet::_decode("describe", parquet__describe(to_json({ path => $path })))
+}
+
+## Group rows by $by and aggregate per group — SQL GROUP BY. opts: agg (the
+## column to aggregate), func (count/sum/min/max/mean, default count). A
+## non-count func requires agg. Groups are returned sorted by key ascending.
+## Returns the list of { key, count, value } hashrefs.
+fn Parquet::group_by ($path, $by, %opts) {
+    die "Parquet::group_by: file `$path` not found" unless -e $path
+    var %req = (path => $path, by => $by, func => ($opts{func} // "count"))
+    $req{agg} = $opts{agg} if defined $opts{agg}
+    val $o = Parquet::_decode("group_by", parquet__group_by(to_json(\%req)))
+    @{ $o->{groups} }
+}
+
+## $opts{n} rows (default 10) chosen uniformly at random — polars sample
+## (random), distinct from `sample` (a contiguous window). Reproducible for a
+## given `seed` (default 0); n caps at the row count and the result keeps file
+## order. opts: n, seed, columns. Returns the sampled rows.
+fn Parquet::random_sample ($path, %opts) {
+    die "Parquet::random_sample: file `$path` not found" unless -e $path
+    var %req = (path => $path, n => ($opts{n} // 10), seed => ($opts{seed} // 0))
+    $req{columns} = $opts{columns} if defined $opts{columns}
+    val $o = Parquet::_decode("random_sample", parquet__random_sample(to_json(\%req)))
+    @{ $o->{rows} }
+}
+
+## Write a parquet file out as NDJSON (one object per line) at $dst — the
+## inverse of from_json and the JSON counterpart of to_csv. Returns { path, rows }.
+fn Parquet::to_ndjson ($path, $dst) {
+    die "Parquet::to_ndjson: file `$path` not found" unless -e $path
+    Parquet::_decode("to_ndjson", parquet__to_ndjson(to_json({ path => $path, dst => $dst })))
+}
+
+## Rewrite $src to $dst with a target max row-group row count — row-group
+## repacking (split a huge group for parallel scan, or coalesce tiny ones).
+## Unlike compress it changes only the sizing; codec defaults to zstd. opts:
+## row_group (default 65536), codec/compression. Returns
+## { dst, rows, row_group, num_row_groups, compression }.
+fn Parquet::repartition ($src, $dst, %opts) {
+    die "Parquet::repartition: src `$src` not found" unless -e $src
+    Parquet::_decode("repartition",
+        parquet__repartition(to_json({
+            src => $src, dst => $dst,
+            row_group => ($opts{row_group} // 65536),
+            compression => ($opts{codec} // $opts{compression}),
+        })))
+}
+
+## Each column's Arrow logical data type — the decoded-type view, distinct from
+## schema's parquet physical types. Returns
+## { num_fields, columns => [{ name, dtype, nullable }] }.
+fn Parquet::dtypes ($path) {
+    die "Parquet::dtypes: file `$path` not found" unless -e $path
+    Parquet::_decode("dtypes", parquet__dtypes(to_json({ path => $path })))
+}

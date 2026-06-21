@@ -167,11 +167,103 @@ assert_eq join(",", @{ $hs->{columns} }), "id,name",  "hstack: src columns then 
 assert_eq Parquet::schema("$tmp/demo-hs.parquet")->{num_fields}, 2, "hstack: combined file has both columns"
 assert_dies fn { Parquet::hstack($hs_l, $hs_l, "$tmp/demo-hs-dup.parquet") }, "hstack: rejects a duplicate column name"
 
+# ── filter: rows matching column OP value ───────────────────────────
+val @fgt = Parquet::filter($path, "id", "gt", value => 3)
+assert_eq scalar(@fgt), 2,           "filter(id > 3): 2 rows"
+assert_eq $fgt[0]->{name}, "dave",   "filter(id > 3): first is dave (id 4)"
+val @feq = Parquet::filter($path, "name", "eq", value => "carol")
+assert_eq scalar(@feq), 1,           "filter(name == carol): 1 row"
+assert_eq $feq[0]->{id}, 3,          "filter(name == carol): id 3"
+val @fnull = Parquet::filter($path, "score", "is_null")
+assert_eq scalar(@fnull), 1,         "filter(score is_null): 1 row (carol)"
+assert_eq $fnull[0]->{name}, "carol","filter(score is_null): carol has the null score"
+val @fnn = Parquet::filter($path, "score", "is_not_null")
+assert_eq scalar(@fnn), 4,           "filter(score is_not_null): 4 rows"
+assert_dies fn { Parquet::filter($path, "id", "gt") }, "filter: a comparison op without a value dies"
+
+# ── where_count: count-only predicate ───────────────────────────────
+assert_eq Parquet::where_count($path, "id", "ge", value => 3), 3, "where_count(id >= 3): 3"
+assert_eq Parquet::where_count($path, "id", "lt", value => 1), 0, "where_count(id < 1): 0"
+
+# ── filter_to: write only matching rows to a new file ───────────────
+val $fpq = "$tmp/demo-filter.parquet"
+val $ft = Parquet::filter_to($path, $fpq, "id", "gt", value => 3)
+assert_eq $ft->{rows}, 2,            "filter_to(id > 3): 2 rows written"
+assert_eq Parquet::count($fpq), 2,   "filter_to: output file holds 2 rows"
+assert_dies fn { Parquet::filter_to($path, $fpq, "id", "gt", value => 999) }, "filter_to: empty result dies"
+
+# ── distinct: unique rows ───────────────────────────────────────────
+val @dist = Parquet::distinct($vcpq, columns => ["c"])
+assert_eq scalar(@dist), 3,          "distinct(c): 3 unique colors"
+
+# ── sort: order by a column ─────────────────────────────────────────
+val @sd = Parquet::sort($path, "id", descending => 1)
+assert_eq $sd[0]->{id}, 5,           "sort(id desc): id 5 first"
+assert_eq $sd[-1]->{id}, 1,          "sort(id desc): id 1 last"
+val @ss = Parquet::sort($path, "score")
+assert_eq $ss[-1]->{name}, "carol",  "sort(score asc): null score (carol) sorts last"
+
+# ── column: extract one field as a flat list ────────────────────────
+val @ids = Parquet::column($path, "id")
+assert_eq scalar(@ids), 5,           "column(id): 5 values"
+assert_eq join(",", @ids), "1,2,3,4,5", "column(id): the id values in file order"
+assert_dies fn { Parquet::column($path, "nope") }, "column: unknown column dies"
+
+# ── sum: numeric column total ───────────────────────────────────────
+assert_eq Parquet::sum($path, "id"), 15, "sum(id): 1+2+3+4+5 = 15"
+
+# ── describe: per-column numeric summary ────────────────────────────
+val $desc = Parquet::describe($path)
+assert_eq $desc->{num_rows}, 5,      "describe: 5 rows"
+val @dscore = grep { $_->{column} eq "score" } @{ $desc->{columns} }
+assert_eq $dscore[0]->{count}, 4,        "describe(score): 4 non-null"
+assert_eq $dscore[0]->{null_count}, 1,   "describe(score): 1 null"
+
+# ── group_by: aggregate per group ───────────────────────────────────
+val $gpq = "$tmp/grp.ndjson"
+spurt($gpq, qq({"r":"us","a":10}\n{"r":"eu","a":20}\n{"r":"us","a":30}\n))
+val $gparq = "$tmp/grp.parquet"
+Parquet::from_json($gpq, $gparq)
+val @gc = Parquet::group_by($gparq, "r")
+assert_eq scalar(@gc), 2,            "group_by(r): 2 groups"
+assert_eq $gc[0]->{key}, "eu",       "group_by(r): groups sorted by key asc (eu first)"
+assert_eq $gc[1]->{count}, 2,        "group_by(r): us has 2 rows"
+val @gs = Parquet::group_by($gparq, "r", agg => "a", func => "sum")
+assert_eq $gs[1]->{value}, 40,       "group_by(r, sum a): us = 10+30 = 40"
+
+# ── random_sample: reproducible random rows ─────────────────────────
+val @r1 = Parquet::random_sample($path, n => 3, seed => 7)
+val @r2 = Parquet::random_sample($path, n => 3, seed => 7)
+assert_eq scalar(@r1), 3,                          "random_sample(n=3): 3 rows"
+assert_eq join(",", map { $_->{id} } @r1), join(",", map { $_->{id} } @r2), "random_sample: same seed → same rows"
+assert_eq scalar(Parquet::random_sample($path, n => 100)), 5, "random_sample: n caps at the row count"
+
+# ── to_ndjson: parquet → NDJSON file ────────────────────────────────
+val $ndout = "$tmp/demo.ndjson"
+val $nd = Parquet::to_ndjson($path, $ndout)
+assert_eq $nd->{rows}, 5,            "to_ndjson: 5 rows written"
+assert_ok -e $ndout,                 "to_ndjson: output file exists"
+
+# ── repartition: change row-group sizing ────────────────────────────
+val $rpq = "$tmp/demo-repart.parquet"
+val $rp = Parquet::repartition($path, $rpq, row_group => 2)
+assert_eq $rp->{rows}, 5,            "repartition: all 5 rows preserved"
+assert_eq $rp->{num_row_groups}, 3, "repartition(row_group=2): 5 rows → 3 groups"
+
+# ── dtypes: Arrow logical types ─────────────────────────────────────
+val $dt = Parquet::dtypes($path)
+assert_eq $dt->{num_fields}, 3,      "dtypes: 3 fields"
+val @dtid = grep { $_->{name} eq "id" } @{ $dt->{columns} }
+assert_eq $dtid[0]->{dtype}, "Int64", "dtypes(id): Int64"
+
 # cleanup
 unlink $path    if -e $path
 unlink $path2   if -e $path2
 unlink $proj    if -e $proj
 unlink $dropped if -e $dropped
+unlink $fpq     if -e $fpq
+unlink $ndout   if -e $ndout
+unlink $rpq     if -e $rpq
 rmdir $tmp   if -d $tmp
 
 test_run

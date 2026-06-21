@@ -63,4 +63,19 @@ assert_ok exists &Parquet::bloom_filter_summary, "Parquet::bloom_filter_summary 
 assert_ok exists &Parquet::sorting_columns_summary, "Parquet::sorting_columns_summary exists"
 assert_ok exists &Parquet::sample, "Parquet::sample exists"
 assert_ok exists &Parquet::features, "Parquet::features exists"
+
+# ── Parquet.stk row predicates / reshaping (polars-style) ──
+assert_ok exists &Parquet::filter, "Parquet::filter exists"
+assert_ok exists &Parquet::where_count, "Parquet::where_count exists"
+assert_ok exists &Parquet::filter_to, "Parquet::filter_to exists"
+assert_ok exists &Parquet::distinct, "Parquet::distinct exists"
+assert_ok exists &Parquet::sort, "Parquet::sort exists"
+assert_ok exists &Parquet::column, "Parquet::column exists"
+assert_ok exists &Parquet::sum, "Parquet::sum exists"
+assert_ok exists &Parquet::describe, "Parquet::describe exists"
+assert_ok exists &Parquet::group_by, "Parquet::group_by exists"
+assert_ok exists &Parquet::random_sample, "Parquet::random_sample exists"
+assert_ok exists &Parquet::to_ndjson, "Parquet::to_ndjson exists"
+assert_ok exists &Parquet::repartition, "Parquet::repartition exists"
+assert_ok exists &Parquet::dtypes, "Parquet::dtypes exists"
 test_run
