@@ -87,8 +87,8 @@ p Parquet::count   "events.parquet"
 p to_json Parquet::schema "events.parquet"
 
 # Per-row-group breakdown.
-my @rgs = Parquet::rowgroups "events.parquet"
-for my $rg (@rgs) {
+val @rgs = Parquet::rowgroups "events.parquet"
+for val $rg (@rgs) {
     p "rg $rg->{ordinal}: $rg->{num_rows} rows, $rg->{total_compressed_size} bytes"
 }
 
@@ -97,16 +97,16 @@ Parquet::stats("events.parquet") |> ep
 Parquet::stats "events.parquet", column => "user_id"
 
 # Peek at rows.
-my @first = Parquet::head "events.parquet", n => 20
-my @last  = Parquet::tail "events.parquet", n => 5
-my @cols  = Parquet::head "events.parquet", n => 10, columns => ["user_id", "ts"]
+val @first = Parquet::head "events.parquet", n => 20
+val @last  = Parquet::tail "events.parquet", n => 5
+val @cols  = Parquet::head "events.parquet", n => 10, columns => ["user_id", "ts"]
 
 # Stream every row (no full-result buffering — for big files).
 Parquet::stream "events.parquet",
-    callback => sub ($row) { process $row }
+    callback => fn ($row) { process $row }
 
 # Convert / recompress.
-my $csv = Parquet::to_csv "events.parquet"                       # → scalar
+val $csv = Parquet::to_csv "events.parquet"                       # → scalar
 Parquet::to_csv "events.parquet", output => "events.csv"          # → file
 Parquet::compress "events.parquet", "events.zst.parquet",
                   codec => "zstd"                                  # recompress
