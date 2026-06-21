@@ -93,7 +93,7 @@ for val $rg (@rgs) {
 }
 
 # Per-column stats (aggregated across row groups).
-Parquet::stats("events.parquet") |> ep
+Parquet::stats "events.parquet" |> ep
 Parquet::stats "events.parquet", column => "user_id"
 
 # Peek at rows.
@@ -103,7 +103,7 @@ val @cols  = Parquet::head "events.parquet", n => 10, columns => ["user_id", "ts
 
 # Stream every row (no full-result buffering — for big files).
 Parquet::stream "events.parquet",
-    callback => fn ($row) { process $row }
+    callback => fn { process _ }
 
 # Convert / recompress.
 val $csv = Parquet::to_csv "events.parquet"                       # → scalar
