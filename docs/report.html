@@ -101,6 +101,10 @@
         <div class="stat-card"><div class="stat-val cyan">opt-in</div><div class="stat-label">Tier</div></div>
         <div class="stat-card"><div class="stat-val cyan">dlopen</div><div class="stat-label">Load model</div></div>
         <div class="stat-card"><div class="stat-val">JSON-over-FFI</div><div class="stat-label">Envelope</div></div>
+        <div class="stat-card"><div class="stat-val green">61</div><div class="stat-label">Public Parquet:: fns</div></div>
+        <div class="stat-card"><div class="stat-val green">57</div><div class="stat-label">parquet__ FFI exports</div></div>
+        <div class="stat-card"><div class="stat-val cyan">6</div><div class="stat-label">Compression codecs</div></div>
+        <div class="stat-card"><div class="stat-val">MIT</div><div class="stat-label">License</div></div>
       </div>
 
       <hr class="section-rule">
@@ -126,7 +130,7 @@
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">&amp;</span>FFI ENVELOPE</h2>
-      <p>JSON in / JSON out across the FFI boundary. Each <code>Parquet::*</code> wrapper serializes its args to a JSON dict and calls the matching <code>parquet__*</code> symbol resolved out of <code>libstryke_parquet.{dylib,so}</code>; the cdylib returns a JSON <code>CString</code> the wrapper parses. The exports span inspection (<code>version</code>, <code>inspect</code>, <code>schema</code>, <code>count</code>, <code>rowgroups</code>, <code>stats</code>, <code>metadata</code>), row read and conversion (<code>head</code>, <code>tail</code>, <code>to_json</code>, <code>to_csv</code>, <code>from_csv</code>, <code>from_json</code>, <code>write</code>, <code>write_partitioned</code>, <code>compress</code>, <code>merge</code>) and diagnostics (<code>validate</code>, <code>column_chunk_stats</code>, <code>sample</code>, <code>features</code>); the authoritative list is <code>[ffi].exports</code> in <code>stryke.toml</code>. The returned <code>CString</code> is freed via the cdylib-exported <code>stryke_free_cstring</code>, wired automatically by <code>rust_ffi::load_cdylib</code>.</p>
+      <p>JSON in / JSON out across the FFI boundary. Each <code>Parquet::*</code> wrapper serializes its args to a JSON dict and calls the matching <code>parquet__*</code> symbol resolved out of <code>libstryke_parquet.{dylib,so}</code>; the cdylib returns a JSON <code>CString</code> the wrapper parses. The exports span inspection (<code>version</code>, <code>inspect</code>, <code>schema</code>, <code>dtypes</code>, <code>count</code>, <code>rowgroups</code>, <code>row_group_summary</code>, <code>stats</code>, <code>metadata</code>, <code>schema_diff</code>), row read (<code>head</code>, <code>tail</code>, <code>slice</code>, <code>sample</code>, <code>reverse</code>, <code>gather</code>, <code>random_sample</code>, <code>to_json</code>, <code>to_csv</code>, <code>to_ndjson</code>, <code>column</code>), row predicates and reshaping (<code>filter</code>, <code>where_count</code>, <code>filter_to</code>, <code>distinct</code>, <code>sort</code>, <code>top_k</code>, <code>value_counts</code>, <code>group_by</code>), aggregates (<code>sum</code>, <code>min</code>, <code>max</code>, <code>mean</code>, <code>n_unique</code>, <code>quantile</code>, <code>describe</code>), conversion and write (<code>from_csv</code>, <code>from_json</code>, <code>write</code>, <code>write_partitioned</code>, <code>compress</code>, <code>repartition</code>, <code>merge</code>, <code>hstack</code>, <code>select</code>, <code>drop</code>, <code>rename</code>, <code>with_row_index</code>), and diagnostics (<code>validate</code>, <code>column_chunk_stats</code>, <code>size_report</code>, <code>null_summary</code>, <code>encoding_summary</code>, <code>bloom_filter_summary</code>, <code>sorting_columns_summary</code>, <code>features</code>); the authoritative list is <code>[ffi].exports</code> in <code>stryke.toml</code>. The returned <code>CString</code> is freed via the cdylib-exported <code>stryke_free_cstring</code>, wired automatically by <code>rust_ffi::load_cdylib</code>.</p>
 <pre># request shape (built by the .stk wrapper)
 {"verb": "&lt;op&gt;", "...": ...}
 
@@ -137,6 +141,36 @@
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">/</span>SCOPE</h2>
       <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-parquet#readme">"What this is (and what it isn't)"</a> + "API reference" sections for the authoritative scope. The package is intentionally narrower than its underlying SDK / driver &mdash; the goal is "useful from a shell pipeline", not "complete API coverage".</p>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">%</span>PUBLIC SURFACE</h2>
+      <p>61 public <code>Parquet::*</code> functions backed by 57 <code>parquet__*</code> FFI exports (the remainder are pure-stryke composites &mdash; <code>column_names</code>, <code>column_count</code>, <code>is_empty</code>, <code>median</code> &mdash; built over other calls). Grouped by intent below; the full annotated reference with return shapes is the <a href="https://github.com/MenkeTechnologies/stryke-parquet#0x04-api-reference">README "API reference"</a>, and the canonical export list is <code>[ffi].exports</code> in <code>stryke.toml</code>.</p>
+      <table class="arch-table">
+        <thead><tr><th>Group</th><th>Functions</th></tr></thead>
+        <tbody>
+          <tr><td>Inspection &amp; schema (footer-only)</td><td><code>version</code> · <code>inspect</code> · <code>schema</code> · <code>dtypes</code> · <code>count</code> · <code>rowgroups</code> · <code>row_group_summary</code> · <code>stats</code> · <code>metadata</code> · <code>schema_diff</code> · <code>column_names</code> · <code>column_count</code> · <code>is_empty</code></td></tr>
+          <tr><td>Reading rows</td><td><code>head</code> · <code>tail</code> · <code>slice</code> · <code>sample</code> · <code>reverse</code> · <code>gather</code> · <code>random_sample</code> · <code>to_json</code> · <code>stream</code> · <code>column</code></td></tr>
+          <tr><td>Predicates &amp; reshaping</td><td><code>filter</code> · <code>where_count</code> · <code>filter_to</code> · <code>distinct</code> · <code>sort</code> · <code>top_k</code> · <code>value_counts</code> · <code>group_by</code></td></tr>
+          <tr><td>Aggregates</td><td><code>sum</code> · <code>min</code> · <code>max</code> · <code>mean</code> · <code>n_unique</code> · <code>quantile</code> · <code>median</code> · <code>describe</code></td></tr>
+          <tr><td>Conversion &amp; writing</td><td><code>to_csv</code> · <code>to_ndjson</code> · <code>from_csv</code> · <code>from_json</code> · <code>write</code> · <code>write_partitioned</code> · <code>compress</code> · <code>repartition</code> · <code>merge</code> · <code>hstack</code> · <code>select</code> · <code>drop</code> · <code>rename</code> · <code>with_row_index</code></td></tr>
+          <tr><td>Diagnostics</td><td><code>validate</code> · <code>column_chunk_stats</code> · <code>size_report</code> · <code>null_summary</code> · <code>encoding_summary</code> · <code>bloom_filter_summary</code> · <code>sorting_columns_summary</code> · <code>features</code></td></tr>
+        </tbody>
+      </table>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">+</span>DEPENDENCIES</h2>
+      <p>The cdylib is built on the same <code>parquet</code> + <code>arrow</code> crate family as <code>stryke-arrow</code>; the JSON envelope uses <code>serde_json</code> with <code>preserve_order</code> so column order survives round-trips. Compression backends are compiled into the <code>parquet</code> crate's feature set.</p>
+      <table class="arch-table">
+        <thead><tr><th>Crate</th><th>Version</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><code>parquet</code></td><td>58</td><td>parquet reader/writer; codec features snap / brotli / flate2 / lz4 / zstd / base64</td></tr>
+          <tr><td><code>arrow</code>, <code>arrow-json</code>, <code>arrow-csv</code></td><td>58</td><td>columnar bridge + CSV/JSON conversion</td></tr>
+          <tr><td><code>serde</code> / <code>serde_json</code></td><td>1</td><td>FFI JSON envelope (<code>preserve_order</code>)</td></tr>
+          <tr><td><code>anyhow</code></td><td>1</td><td>error propagation into the <code>{"error": ...}</code> envelope</td></tr>
+          <tr><td><code>once_cell</code></td><td>1</td><td>lazily-initialized statics</td></tr>
+        </tbody>
+      </table>
+      <p>Release profile: <code>opt-level = 3</code>, <code>lto = "thin"</code>, <code>codegen-units = 1</code>, <code>strip = true</code>, <code>panic = "abort"</code>.</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">#</span>PROJECT METADATA</h2>
