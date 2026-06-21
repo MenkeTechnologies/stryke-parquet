@@ -572,3 +572,84 @@ fn Parquet::dtypes ($path) {
     die "Parquet::dtypes: file `$path` not found" unless -e $path
     Parquet::_decode("dtypes", parquet__dtypes(to_json({ path => $path })))
 }
+
+# ── scalar reducers / quantiles (polars-style) ───────────────────────
+
+## The minimum of a numeric $column — SQL MIN. Non-numeric and null cells are
+## skipped; an all-null/empty column yields undef. The column must exist.
+## Returns the min (a scalar).
+fn Parquet::min ($path, $column) {
+    die "Parquet::min: file `$path` not found" unless -e $path
+    Parquet::_decode("min", parquet__min(to_json({ path => $path, column => $column })))->{min}
+}
+
+## The maximum of a numeric $column — SQL MAX. Non-numeric and null cells are
+## skipped; an all-null/empty column yields undef. The column must exist.
+## Returns the max (a scalar).
+fn Parquet::max ($path, $column) {
+    die "Parquet::max: file `$path` not found" unless -e $path
+    Parquet::_decode("max", parquet__max(to_json({ path => $path, column => $column })))->{max}
+}
+
+## The arithmetic mean of a numeric $column — SQL AVG. Non-numeric and null
+## cells are skipped; an all-null/empty column yields undef (never NaN). The
+## column must exist. Returns the mean (a scalar).
+fn Parquet::mean ($path, $column) {
+    die "Parquet::mean: file `$path` not found" unless -e $path
+    Parquet::_decode("mean", parquet__mean(to_json({ path => $path, column => $column })))->{mean}
+}
+
+## Number of distinct values in $column — SQL COUNT(DISTINCT col) / polars
+## n_unique. Distinctness is by the cell's JSON form. opts: include_nulls
+## (default 1 — a null counts as one group; pass 0 for the SQL convention that
+## excludes NULL). The column must exist. Returns the distinct count (a scalar).
+fn Parquet::n_unique ($path, $column, %opts) {
+    die "Parquet::n_unique: file `$path` not found" unless -e $path
+    var %req = (path => $path, column => $column)
+    $req{include_nulls} = exists($opts{include_nulls}) ? $opts{include_nulls} : 1
+    Parquet::_decode("n_unique", parquet__n_unique(to_json(\%req)))->{n_unique}
+}
+
+## A quantile of a numeric $column — polars quantile / SQL percentile. $q is in
+## [0, 1] (0.5 = median, the default); the value is linearly interpolated
+## between the two surrounding samples. Non-numeric and null cells are dropped;
+## an all-null/empty column yields undef. The column must exist and $q must be
+## in [0, 1]. opts: q (default 0.5). Returns the quantile value (a scalar).
+fn Parquet::quantile ($path, $column, %opts) {
+    die "Parquet::quantile: file `$path` not found" unless -e $path
+    var %req = (path => $path, column => $column, q => ($opts{q} // 0.5))
+    Parquet::_decode("quantile", parquet__quantile(to_json(\%req)))->{quantile}
+}
+
+## Median of a numeric $column — sugar for quantile($path, $column, q => 0.5).
+fn Parquet::median ($path, $column) {
+    Parquet::quantile($path, $column, q => 0.5)
+}
+
+# ── reshaping that produces files ────────────────────────────────────
+
+## Write $path to a new parquet $dst with a leading 0-based row-index column
+## prepended — polars with_row_index / pandas reset_index. opts: name (the
+## index column name, default "index"), offset (the first index, default 0),
+## codec/compression (default zstd). A name that collides with an existing
+## column is rejected. Returns { dst, rows, name, columns, compression }.
+fn Parquet::with_row_index ($path, $dst, %opts) {
+    die "Parquet::with_row_index: file `$path` not found" unless -e $path
+    var %req = (path => $path, dst => $dst,
+                compression => ($opts{codec} // $opts{compression}))
+    $req{name}   = $opts{name}   if defined $opts{name}
+    $req{offset} = $opts{offset} if defined $opts{offset}
+    Parquet::_decode("with_row_index", parquet__with_row_index(to_json(\%req)))
+}
+
+## Compare the schemas of two parquet files (footer-only) — columns added in
+## $other, removed from $base, and shared names whose Arrow type changed. $base
+## is the reference; $other the candidate. Returns { equal, added => [...],
+## removed => [...], type_changed => [{ column, base, other }], base_only,
+## other_only }; equal is true when there are no additions, removals or type
+## changes.
+fn Parquet::schema_diff ($base, $other) {
+    die "Parquet::schema_diff: file `$base` not found" unless -e $base
+    die "Parquet::schema_diff: file `$other` not found" unless -e $other
+    Parquet::_decode("schema_diff", parquet__schema_diff(to_json({ base => $base, other => $other })))
+}

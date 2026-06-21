@@ -119,10 +119,11 @@ Each `Parquet::*` wrapper builds a JSON args dict and calls a sibling
 cdylib is dlopened in-process on first `use Parquet` (via stryke's
 `pkg::commands::try_load_ffi_for` resolver hook). Its exports span
 inspection (`version`, `inspect`, `schema`, `dtypes`, `count`, `rowgroups`,
-`stats`, `metadata`), row read (`head`, `tail`, `to_json`, `to_csv`,
-`to_ndjson`), row predicates / reshaping (`filter`, `where_count`,
-`filter_to`, `distinct`, `sort`, `column`, `sum`, `describe`, `group_by`,
-`random_sample`), conversion (`from_csv`, `from_json`, `write`,
+`stats`, `metadata`, `schema_diff`), row read (`head`, `tail`, `to_json`,
+`to_csv`, `to_ndjson`), row predicates / reshaping (`filter`, `where_count`,
+`filter_to`, `distinct`, `sort`, `column`, `sum`, `min`, `max`, `mean`,
+`n_unique`, `quantile`, `describe`, `group_by`, `random_sample`,
+`with_row_index`), conversion (`from_csv`, `from_json`, `write`,
 `write_partitioned`, `compress`, `repartition`, `merge`, `select`), and
 diagnostics (`validate`, `column_chunk_stats`, `size_report`, `null_summary`,
 `encoding_summary`, `row_group_summary`, `sample`, `features`). The
@@ -179,9 +180,17 @@ Parquet::distinct    $path, %opts → @rows                 # unique rows (polar
 Parquet::sort        $path, $column, %opts → @rows        # ORDER BY $column; opts: descending => 1, columns; nulls last, stable
 Parquet::column      $path, $column → @values             # a single column's cells as a flat list (polars Series)
 Parquet::sum         $path, $column → $sum                # numeric sum of $column (nulls/non-numeric skipped)
+Parquet::min         $path, $column → $min                # numeric MIN of $column (nulls/non-numeric skipped; all-null → undef)
+Parquet::max         $path, $column → $max                # numeric MAX of $column (nulls/non-numeric skipped; all-null → undef)
+Parquet::mean        $path, $column → $mean               # numeric AVG of $column (nulls/non-numeric skipped; all-null → undef, never NaN)
+Parquet::n_unique    $path, $column, %opts → $n           # COUNT(DISTINCT col); opts: include_nulls => 0 to exclude the null group (default 1)
+Parquet::quantile    $path, $column, %opts → $q           # linear-interpolated quantile of $column; opts: q in [0,1] (default 0.5 = median)
+Parquet::median      $path, $column → $m                  # sugar for quantile(q => 0.5)
 Parquet::describe    $path → \%resp                       # per-column { count, null_count, min, max, mean, sum }; non-numeric → null numerics
 Parquet::group_by    $path, $by, %opts → @groups          # GROUP BY $by → { key, count, value }; opts: agg, func (count/sum/min/max/mean)
 Parquet::random_sample $path, %opts → @rows               # n random rows (reservoir, reproducible per seed); opts: n, seed, columns; keeps file order
+Parquet::with_row_index $path, $dst, %opts → \%resp       # write a copy with a leading 0-based index column (polars with_row_index); opts: name (default "index"), offset (default 0), codec
+Parquet::schema_diff $base, $other → \%resp               # footer-only schema diff → { equal, added, removed, type_changed:[{column,base,other}], base_only, other_only }
 ```
 
 ### Diagnostics

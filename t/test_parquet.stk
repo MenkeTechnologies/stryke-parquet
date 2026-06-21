@@ -256,7 +256,51 @@ assert_eq $dt->{num_fields}, 3,      "dtypes: 3 fields"
 val @dtid = grep { $_->{name} eq "id" } @{ $dt->{columns} }
 assert_eq $dtid[0]->{dtype}, "Int64", "dtypes(id): Int64"
 
+# ── min / max / mean: scalar reducers ───────────────────────────────
+# demo score = 1.5, 2.0, null, 3.25, 4.0 (null skipped).
+assert_eq Parquet::min($path, "score"), 1.5,    "min(score): 1.5"
+assert_eq Parquet::max($path, "score"), 4.0,    "max(score): 4.0"
+assert_eq Parquet::mean($path, "score"), 2.6875, "mean(score): (1.5+2+3.25+4)/4"
+assert_eq Parquet::min($path, "id"), 1,         "min(id): 1"
+assert_eq Parquet::max($path, "id"), 5,         "max(id): 5"
+assert_dies fn { Parquet::min($path, "nope") }, "min: unknown column dies"
+
+# ── n_unique: distinct value count ──────────────────────────────────
+# names are all distinct (5); ids all distinct (5).
+assert_eq Parquet::n_unique($path, "name"), 5,  "n_unique(name): 5"
+assert_eq Parquet::n_unique($path, "id"), 5,    "n_unique(id): 5"
+# score has 4 non-null distinct + 1 null group → 5 with nulls, 4 without.
+assert_eq Parquet::n_unique($path, "score"), 5,                       "n_unique(score): 5 incl. null group"
+assert_eq Parquet::n_unique($path, "score", include_nulls => 0), 4,  "n_unique(score, no nulls): 4"
+
+# ── quantile / median: numeric percentile ───────────────────────────
+# score non-null sorted = [1.5, 2.0, 3.25, 4.0].
+assert_eq Parquet::quantile($path, "score", q => 0), 1.5,   "quantile(score, 0): min"
+assert_eq Parquet::quantile($path, "score", q => 1), 4.0,   "quantile(score, 1): max"
+assert_eq Parquet::median($path, "score"), 2.625,           "median(score): (2.0+3.25)/2"
+assert_dies fn { Parquet::quantile($path, "score", q => 2) }, "quantile: q out of range dies"
+
+# ── with_row_index: prepend a 0-based index column ──────────────────
+val $ripq = "$tmp/demo-rowindex.parquet"
+val $ri = Parquet::with_row_index($path, $ripq)
+assert_eq $ri->{rows}, 5,                "with_row_index: 5 rows"
+assert_eq $ri->{name}, "index",          "with_row_index: default name 'index'"
+assert_eq $ri->{columns}[0], "index",    "with_row_index: index column leads"
+val @ridx = Parquet::column($ripq, "index")
+assert_eq join(",", @ridx), "0,1,2,3,4", "with_row_index: index is 0..4 in file order"
+assert_dies fn { Parquet::with_row_index($path, $ripq, name => "id") }, "with_row_index: name collision dies"
+
+# ── schema_diff: compare two file schemas ───────────────────────────
+val $sd_same = Parquet::schema_diff($path, $path)
+assert_ok $sd_same->{equal},             "schema_diff(self): equal"
+# the row-indexed file adds 'index' vs the original.
+val $sd = Parquet::schema_diff($path, $ripq)
+assert_ok !$sd->{equal},                 "schema_diff(orig, indexed): not equal"
+assert_eq $sd->{added}[0], "index",      "schema_diff: 'index' added in the indexed file"
+assert_eq $sd->{other_only}, 1,          "schema_diff: one column only in 'other'"
+
 # cleanup
+unlink $ripq if -e $ripq
 unlink $path    if -e $path
 unlink $path2   if -e $path2
 unlink $proj    if -e $proj

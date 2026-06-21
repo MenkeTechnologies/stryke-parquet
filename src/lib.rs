@@ -1901,6 +1901,274 @@ fn op_dtypes(args: Value) -> Result<Value> {
     Ok(json!({ "num_fields": columns.len(), "columns": columns }))
 }
 
+// ── ops: scalar reducers / quantiles (polars-style) ──────────────────────────
+
+/// Scan a numeric `column` and reduce its non-null cells with `reducer`. Shared
+/// by `op_min`/`op_max`/`op_mean`: each reads only that column (projection) and
+/// folds the numeric cells; non-numeric and null cells are skipped, `count`
+/// reports how many cells took part. The column must exist (a typo fails loud).
+fn reduce_numeric_column(args: &Value, what: &str) -> Result<(String, Vec<f64>)> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?
+        .to_string();
+    if !column_names_of(path)?.iter().any(|c| c == &column) {
+        bail!("{what}: no column `{column}` in `{path}`");
+    }
+    let projection = vec![column.clone()];
+    let all = read_all_rows(path, Some(&projection))?;
+    let nums: Vec<f64> = all
+        .iter()
+        .filter_map(|r| r.get(&column).and_then(Value::as_f64))
+        .collect();
+    Ok((column, nums))
+}
+
+/// The minimum of a numeric `column` — SQL `MIN`. Non-numeric and null cells are
+/// skipped; `count` reports how many cells were considered. An all-null/empty
+/// column reports `min: null`. The companion to `op_sum`/`op_max`. opts: path,
+/// column. Returns `{column, min, count}`.
+fn op_min(args: Value) -> Result<Value> {
+    let (column, nums) = reduce_numeric_column(&args, "min")?;
+    let min = nums
+        .iter()
+        .cloned()
+        .fold(None, |a: Option<f64>, x| Some(a.map_or(x, |m| m.min(x))))
+        .map(|m| json!(m))
+        .unwrap_or(Value::Null);
+    Ok(json!({ "column": column, "min": min, "count": nums.len() }))
+}
+
+/// The maximum of a numeric `column` — SQL `MAX`. Non-numeric and null cells are
+/// skipped; `count` reports how many cells were considered. An all-null/empty
+/// column reports `max: null`. The companion to `op_sum`/`op_min`. opts: path,
+/// column. Returns `{column, max, count}`.
+fn op_max(args: Value) -> Result<Value> {
+    let (column, nums) = reduce_numeric_column(&args, "max")?;
+    let max = nums
+        .iter()
+        .cloned()
+        .fold(None, |a: Option<f64>, x| Some(a.map_or(x, |m| m.max(x))))
+        .map(|m| json!(m))
+        .unwrap_or(Value::Null);
+    Ok(json!({ "column": column, "max": max, "count": nums.len() }))
+}
+
+/// The arithmetic mean of a numeric `column` — SQL `AVG`. Non-numeric and null
+/// cells are skipped; `count` reports how many cells were averaged. An
+/// all-null/empty column reports `mean: null` (never a divide-by-zero NaN). The
+/// scalar companion to `op_sum`. opts: path, column. Returns
+/// `{column, mean, count}`.
+fn op_mean(args: Value) -> Result<Value> {
+    let (column, nums) = reduce_numeric_column(&args, "mean")?;
+    let mean = if nums.is_empty() {
+        Value::Null
+    } else {
+        json!(nums.iter().sum::<f64>() / nums.len() as f64)
+    };
+    Ok(json!({ "column": column, "mean": mean, "count": nums.len() }))
+}
+
+/// The number of distinct values in `column` — SQL `COUNT(DISTINCT col)` /
+/// polars `n_unique`. Distinctness is by the cell's canonical JSON form, so
+/// `1` and `1.0` are distinct exactly as the data stored them. `include_nulls`
+/// (default true) counts a null as one distinct group; set false to ignore
+/// nulls (the SQL `COUNT(DISTINCT)` convention, which excludes NULL). The column
+/// must exist. opts: path, column, include_nulls. Returns
+/// `{column, n_unique, total, nulls}`.
+fn op_n_unique(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?
+        .to_string();
+    if !column_names_of(path)?.iter().any(|c| c == &column) {
+        bail!("n_unique: no column `{column}` in `{path}`");
+    }
+    let include_nulls = truthy(&args["include_nulls"], true);
+    let projection = vec![column.clone()];
+    let all = read_all_rows(path, Some(&projection))?;
+    let total = all.len();
+    let mut seen = std::collections::HashSet::new();
+    let mut nulls = 0u64;
+    for r in &all {
+        let cell = r.get(&column).unwrap_or(&Value::Null);
+        if cell.is_null() {
+            nulls += 1;
+            if include_nulls {
+                seen.insert(String::from("null"));
+            }
+        } else {
+            seen.insert(cell.to_string());
+        }
+    }
+    Ok(json!({
+        "column": column,
+        "n_unique": seen.len(),
+        "total": total,
+        "nulls": nulls,
+    }))
+}
+
+/// A quantile of a numeric `column` — polars `quantile` / SQL percentile.
+/// `q` is in `[0, 1]` (0.5 = median). Non-numeric and null cells are dropped,
+/// the remaining values are sorted, and the quantile is computed with linear
+/// interpolation between the two surrounding samples (the pandas/numpy
+/// "linear" method). An all-null/empty column reports `quantile: null`. The
+/// column must exist; `q` outside `[0, 1]` is rejected. opts: path, column, q
+/// (default 0.5). Returns `{column, q, quantile, count}`.
+fn op_quantile(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let column = args["column"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing column"))?
+        .to_string();
+    if !column_names_of(path)?.iter().any(|c| c == &column) {
+        bail!("quantile: no column `{column}` in `{path}`");
+    }
+    let q = args["q"].as_f64().unwrap_or(0.5);
+    if !(0.0..=1.0).contains(&q) {
+        bail!("quantile: q must be in [0, 1], got {q}");
+    }
+    let projection = vec![column.clone()];
+    let all = read_all_rows(path, Some(&projection))?;
+    let mut nums: Vec<f64> = all
+        .iter()
+        .filter_map(|r| r.get(&column).and_then(Value::as_f64))
+        .collect();
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let quantile = if nums.is_empty() {
+        Value::Null
+    } else {
+        // Linear interpolation over the rank position `q * (n - 1)`.
+        let pos = q * (nums.len() as f64 - 1.0);
+        let lo = pos.floor() as usize;
+        let hi = pos.ceil() as usize;
+        let frac = pos - lo as f64;
+        json!(nums[lo] + (nums[hi] - nums[lo]) * frac)
+    };
+    Ok(json!({ "column": column, "q": q, "quantile": quantile, "count": nums.len() }))
+}
+
+// ── ops: reshaping that produces files ───────────────────────────────────────
+
+/// Write `path` to a new parquet `dst` with a leading 0-based integer row-index
+/// column prepended — polars `with_row_index` / pandas `reset_index`. The index
+/// column is named `name` (default `index`) and is the first column; the
+/// original columns follow in order, unchanged. A name that collides with an
+/// existing column is rejected. The index counts file rows from `offset`
+/// (default 0). opts: path, dst, name, offset, compression (default zstd).
+/// Returns `{dst, rows, name, columns, compression}`.
+fn op_with_row_index(args: Value) -> Result<Value> {
+    let path = args["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing path"))?;
+    let dst = args["dst"].as_str().ok_or_else(|| anyhow!("missing dst"))?;
+    let name = args["name"].as_str().unwrap_or("index").to_string();
+    let offset = args["offset"].as_i64().unwrap_or(0);
+    let compression = args["compression"].as_str().unwrap_or("zstd").to_string();
+    let existing = column_names_of(path)?;
+    if existing.iter().any(|c| c == &name) {
+        bail!("with_row_index: column `{name}` already exists in `{path}`");
+    }
+    let all = read_all_rows(path, None)?;
+    // Rebuild each row with the index key first so it leads the output schema
+    // (serde_json keeps insertion order under preserve_order).
+    let rows: Vec<Value> = all
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut m = serde_json::Map::new();
+            m.insert(name.clone(), json!(offset + i as i64));
+            if let Value::Object(orig) = r {
+                for (k, v) in orig {
+                    m.insert(k, v);
+                }
+            }
+            Value::Object(m)
+        })
+        .collect();
+    let written = write_rows_to_parquet(&rows, dst, &compression)?;
+    let mut columns = vec![name.clone()];
+    columns.extend(existing);
+    Ok(json!({
+        "dst": dst,
+        "rows": written,
+        "name": name,
+        "columns": columns,
+        "compression": compression,
+    }))
+}
+
+/// Compare the schemas of two parquet files (footer-only, no data read) — the
+/// columns added in `other`, removed from `base`, and present in both but with a
+/// changed Arrow logical type. `base` is the left/reference file, `other` the
+/// right. Column identity is by name; `type_changed` lists `{column, base, other}`
+/// for shared names whose dtype differs. `equal` is true when there are no
+/// additions, removals, or type changes. opts: base, other (both required).
+/// Returns `{equal, added, removed, type_changed, base_only, other_only}`.
+fn op_schema_diff(args: Value) -> Result<Value> {
+    let base = args["base"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing base"))?;
+    let other = args["other"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing other"))?;
+    // Map column name → Arrow dtype string for each file (the decoded-type view,
+    // matching op_dtypes), preserving file order via the schema field iteration.
+    let dtype_map = |p: &str| -> Result<(Vec<String>, std::collections::HashMap<String, String>)> {
+        let reader = open_parquet_reader(Path::new(p), 1)?;
+        let schema = reader.schema();
+        let mut order = Vec::new();
+        let mut map = std::collections::HashMap::new();
+        for f in schema.fields() {
+            order.push(f.name().clone());
+            map.insert(f.name().clone(), format!("{:?}", f.data_type()));
+        }
+        Ok((order, map))
+    };
+    let (base_order, base_map) = dtype_map(base)?;
+    let (other_order, other_map) = dtype_map(other)?;
+    let added: Vec<String> = other_order
+        .iter()
+        .filter(|c| !base_map.contains_key(*c))
+        .cloned()
+        .collect();
+    let removed: Vec<String> = base_order
+        .iter()
+        .filter(|c| !other_map.contains_key(*c))
+        .cloned()
+        .collect();
+    let type_changed: Vec<Value> = base_order
+        .iter()
+        .filter_map(|c| {
+            let b = base_map.get(c)?;
+            let o = other_map.get(c)?;
+            if b != o {
+                Some(json!({ "column": c, "base": b, "other": o }))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let equal = added.is_empty() && removed.is_empty() && type_changed.is_empty();
+    Ok(json!({
+        "equal": equal,
+        "added": added,
+        "removed": removed,
+        "type_changed": type_changed,
+        "base_only": removed.len(),
+        "other_only": added.len(),
+    }))
+}
+
 // ── ops: integrity / footer detail / sampling ───────────────────────────────
 
 /// Full read: decode every row group and report row count, or the first
@@ -2646,6 +2914,41 @@ pub extern "C" fn parquet__repartition(args: *const c_char) -> *const c_char {
 #[no_mangle]
 pub extern "C" fn parquet__dtypes(args: *const c_char) -> *const c_char {
     ffi_call(args, op_dtypes)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__min(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_min)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__max(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_max)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__mean(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_mean)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__n_unique(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_n_unique)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__quantile(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_quantile)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__with_row_index(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_with_row_index)
+}
+
+#[no_mangle]
+pub extern "C" fn parquet__schema_diff(args: *const c_char) -> *const c_char {
+    ffi_call(args, op_schema_diff)
 }
 
 #[cfg(test)]
@@ -4435,5 +4738,203 @@ mod tests_expand {
         assert_eq!(score["dtype"], json!("Float64"));
         assert_eq!(score["nullable"], json!(true), "score column is nullable");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn op_min_max_mean_reduce_a_numeric_column_skipping_nulls() {
+        let p = tmp("reducers.parquet");
+        write_fixture(&p, 2);
+        let s = p.to_str().unwrap();
+        // score = 10,20,null,40,50 → min 10, max 50, mean 30, count 4 (null skipped).
+        let mn = op_min(json!({"path": s, "column": "score"})).unwrap();
+        assert_eq!(mn["min"].as_f64().unwrap(), 10.0);
+        assert_eq!(mn["count"], json!(4));
+        let mx = op_max(json!({"path": s, "column": "score"})).unwrap();
+        assert_eq!(mx["max"].as_f64().unwrap(), 50.0);
+        let mean = op_mean(json!({"path": s, "column": "score"})).unwrap();
+        assert_eq!(mean["mean"].as_f64().unwrap(), 30.0);
+        // A missing column dies for every reducer.
+        assert!(op_min(json!({"path": s, "column": "nope"})).is_err());
+        assert!(op_max(json!({"path": s, "column": "nope"})).is_err());
+        assert!(op_mean(json!({"path": s, "column": "nope"})).is_err());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn op_mean_of_an_all_null_column_is_null_not_nan() {
+        // A column with no numeric cells must report null (no divide-by-zero).
+        let p = tmp("allnull.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let v = Float64Array::from(vec![None, None, None]);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(v)]).unwrap();
+        {
+            let file = File::create(&p).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let s = p.to_str().unwrap();
+        assert!(op_mean(json!({"path": s, "column": "v"})).unwrap()["mean"].is_null());
+        assert!(op_min(json!({"path": s, "column": "v"})).unwrap()["min"].is_null());
+        assert!(op_max(json!({"path": s, "column": "v"})).unwrap()["max"].is_null());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn op_n_unique_counts_distinct_values_with_and_without_nulls() {
+        // region us,eu,us,null,eu → 2 non-null distinct (us, eu) + null group.
+        let p = tmp("nunique.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "region",
+            DataType::Utf8,
+            true,
+        )]));
+        let regions = StringArray::from(vec![Some("us"), Some("eu"), Some("us"), None, Some("eu")]);
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(regions)]).unwrap();
+        {
+            let file = File::create(&p).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let s = p.to_str().unwrap();
+        // default include_nulls=true → us, eu, null = 3.
+        let v = op_n_unique(json!({"path": s, "column": "region"})).unwrap();
+        assert_eq!(v["n_unique"], json!(3));
+        assert_eq!(v["total"], json!(5));
+        assert_eq!(v["nulls"], json!(1));
+        // include_nulls=false → us, eu = 2 (SQL COUNT(DISTINCT) convention).
+        let v =
+            op_n_unique(json!({"path": s, "column": "region", "include_nulls": false})).unwrap();
+        assert_eq!(v["n_unique"], json!(2));
+        assert!(op_n_unique(json!({"path": s, "column": "nope"})).is_err());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn op_quantile_interpolates_and_validates_q() {
+        let p = tmp("quantile.parquet");
+        write_fixture(&p, 2);
+        let s = p.to_str().unwrap();
+        // score non-null sorted = [10, 20, 40, 50].
+        // median (q=0.5): pos = 0.5*3 = 1.5 → 20 + (40-20)*0.5 = 30.
+        let v = op_quantile(json!({"path": s, "column": "score", "q": 0.5})).unwrap();
+        assert_eq!(v["quantile"].as_f64().unwrap(), 30.0);
+        assert_eq!(v["count"], json!(4));
+        // q=0 → min (10), q=1 → max (50).
+        assert_eq!(
+            op_quantile(json!({"path": s, "column": "score", "q": 0.0})).unwrap()["quantile"]
+                .as_f64()
+                .unwrap(),
+            10.0
+        );
+        assert_eq!(
+            op_quantile(json!({"path": s, "column": "score", "q": 1.0})).unwrap()["quantile"]
+                .as_f64()
+                .unwrap(),
+            50.0
+        );
+        // default q is the median.
+        assert_eq!(
+            op_quantile(json!({"path": s, "column": "score"})).unwrap()["quantile"]
+                .as_f64()
+                .unwrap(),
+            30.0
+        );
+        // q out of range, and a missing column, both die.
+        assert!(op_quantile(json!({"path": s, "column": "score", "q": 1.5})).is_err());
+        assert!(op_quantile(json!({"path": s, "column": "nope"})).is_err());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn op_with_row_index_prepends_a_0_based_index_column() {
+        let p = tmp("rowindex_src.parquet");
+        write_fixture(&p, 2);
+        let out = tmp("rowindex_out.parquet");
+        let s = p.to_str().unwrap();
+        let d = out.to_str().unwrap();
+        let r = op_with_row_index(json!({"path": s, "dst": d})).unwrap();
+        assert_eq!(r["rows"], json!(5));
+        assert_eq!(r["name"], json!("index"));
+        // The index column leads the output schema.
+        let cols = r["columns"].as_array().unwrap();
+        assert_eq!(cols[0], json!("index"));
+        assert_eq!(cols[1], json!("id"));
+        // The written file's index column is 0..4 in file order.
+        let idx = op_column(json!({"path": d, "column": "index"})).unwrap();
+        let vals: Vec<i64> = idx["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_i64().unwrap())
+            .collect();
+        assert_eq!(vals, vec![0, 1, 2, 3, 4]);
+        // A custom name and offset.
+        let out2 = tmp("rowindex_out2.parquet");
+        let d2 = out2.to_str().unwrap();
+        let r =
+            op_with_row_index(json!({"path": s, "dst": d2, "name": "rn", "offset": 100})).unwrap();
+        assert_eq!(r["columns"].as_array().unwrap()[0], json!("rn"));
+        let idx = op_column(json!({"path": d2, "column": "rn"})).unwrap();
+        assert_eq!(idx["values"].as_array().unwrap()[0], json!(100));
+        // A name that collides with an existing column is rejected.
+        assert!(op_with_row_index(json!({"path": s, "dst": d, "name": "id"})).is_err());
+        for f in [p, out, out2] {
+            let _ = std::fs::remove_file(f);
+        }
+    }
+
+    #[test]
+    fn op_schema_diff_reports_added_removed_and_type_changed() {
+        // base: id:Int64, name:Utf8, score:Float64.
+        let base = tmp("diff_base.parquet");
+        write_fixture(&base, 2);
+        // other: id:Utf8 (type change), name:Utf8 (same), extra:Int64 (added);
+        // score removed.
+        let other = tmp("diff_other.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("extra", DataType::Int64, false),
+        ]));
+        let ids = StringArray::from(vec!["1", "2"]);
+        let names = StringArray::from(vec!["a", "b"]);
+        let extra = Int64Array::from(vec![7_i64, 8]);
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(ids), Arc::new(names), Arc::new(extra)],
+        )
+        .unwrap();
+        {
+            let file = File::create(&other).unwrap();
+            let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+        }
+        let v = op_schema_diff(json!({
+            "base": base.to_str().unwrap(),
+            "other": other.to_str().unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(v["equal"], json!(false));
+        assert_eq!(v["added"], json!(["extra"]));
+        assert_eq!(v["removed"], json!(["score"]));
+        let tc = v["type_changed"].as_array().unwrap();
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["column"], json!("id"));
+        assert_eq!(tc[0]["base"], json!("Int64"));
+        assert_eq!(tc[0]["other"], json!("Utf8"));
+        // A file compared with itself is equal.
+        let v = op_schema_diff(json!({
+            "base": base.to_str().unwrap(),
+            "other": base.to_str().unwrap(),
+        }))
+        .unwrap();
+        assert_eq!(v["equal"], json!(true));
+        assert!(v["added"].as_array().unwrap().is_empty());
+        assert!(v["type_changed"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_file(&base);
+        let _ = std::fs::remove_file(&other);
     }
 }

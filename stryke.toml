@@ -61,6 +61,13 @@ exports = [
     "parquet__to_ndjson",
     "parquet__repartition",
     "parquet__dtypes",
+    "parquet__min",
+    "parquet__max",
+    "parquet__mean",
+    "parquet__n_unique",
+    "parquet__quantile",
+    "parquet__with_row_index",
+    "parquet__schema_diff",
 ]
 
 [scripts]

@@ -78,4 +78,16 @@ assert_ok exists &Parquet::random_sample, "Parquet::random_sample exists"
 assert_ok exists &Parquet::to_ndjson, "Parquet::to_ndjson exists"
 assert_ok exists &Parquet::repartition, "Parquet::repartition exists"
 assert_ok exists &Parquet::dtypes, "Parquet::dtypes exists"
+
+# ── Parquet.stk scalar reducers / quantiles ──
+assert_ok exists &Parquet::min, "Parquet::min exists"
+assert_ok exists &Parquet::max, "Parquet::max exists"
+assert_ok exists &Parquet::mean, "Parquet::mean exists"
+assert_ok exists &Parquet::n_unique, "Parquet::n_unique exists"
+assert_ok exists &Parquet::quantile, "Parquet::quantile exists"
+assert_ok exists &Parquet::median, "Parquet::median exists"
+
+# ── Parquet.stk reshaping that produces files ──
+assert_ok exists &Parquet::with_row_index, "Parquet::with_row_index exists"
+assert_ok exists &Parquet::schema_diff, "Parquet::schema_diff exists"
 test_run
