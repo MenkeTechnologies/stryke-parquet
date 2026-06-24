@@ -22,6 +22,8 @@ breakdown, head/tail, recompression. Diagnostic counterpart to
 
 ### [`strykelang`](https://github.com/MenkeTechnologies/strykelang) &middot; [`MenkeTechnologiesMeta`](https://github.com/MenkeTechnologies/MenkeTechnologiesMeta) · [`stryke-arrow`](https://github.com/MenkeTechnologies/stryke-arrow) · [`stryke-duckdb`](https://github.com/MenkeTechnologies/stryke-duckdb) · [`stryke-demo`](https://github.com/MenkeTechnologies/stryke-demo)
 
+### [`Read the Docs`](https://menketechnologies.github.io/stryke-parquet/) &middot; [`Engineering Report`](https://menketechnologies.github.io/stryke-parquet/report.html)
+
 ---
 
 ## Table of Contents
