@@ -313,9 +313,9 @@ cargo test                                # compiles, no live calls
 s test t/                                 # self-contained round-trip
 ```
 
-The suite uses `parquet mkdemo` to generate a fixture parquet in `/tmp/`
-then exercises every diagnostic command against it. No external services
-required.
+The suite calls the cdylib's `Parquet::_mkdemo` export to generate a
+fixture parquet in `/tmp/`, then exercises every diagnostic op against
+it. No external services required.
 
 ## [0x08] Dev workflow
 
@@ -337,6 +337,7 @@ stryke-parquet/
   lib/
     Parquet.stk                    # `use Parquet` — thin wrapper around the FFI symbols
   t/
+    test_diagnostics.stk
     test_parquet.stk
     test_stryke_parquet_surface.stk
   examples/
